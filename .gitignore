@@ -1,0 +1,17 @@
+# Foundry
+out/
+cache/
+broadcast/
+# keep deployment addresses but drop verbose run logs
+broadcast/**/dry-run/
+
+# Env / secrets
+.env
+.env.*
+*.pem
+*.key
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
