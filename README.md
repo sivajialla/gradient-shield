@@ -4,6 +4,8 @@ A Uniswap v4 hook that prices swaps by the swapper's MEV-risk score and emits
 telemetry for an off-chain EigenLayer AVS to consume. Suspicious swappers pay an
 escalated fee; confirmed toxic flow is rejected outright.
 
+# Project Number : HK-UHI10-1050
+
 > **Status: scaffold.** The project structure, contract interfaces, events,
 > errors, hook permissions, and the deployment/test harness are in place and
 > `forge build` / `forge test` pass. The actual fee math, JIT/sandwich
