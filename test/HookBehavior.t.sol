@@ -3,18 +3,18 @@ pragma solidity ^0.8.26;
 
 import {Test, console2} from "forge-std/Test.sol";
 
-import {GradientShield} from "../src/GradientShield.sol";
+import {GradientShieldHook} from "../src/GradientShieldHook.sol";
 import {ScoringOracle} from "../src/ScoringOracle.sol";
 
 /// @title HookBehaviorTest
-/// @notice Tests the *hook mechanics* of {GradientShield} — the parts that make it a
+/// @notice Tests the *hook mechanics* of {GradientShieldHook} — the parts that make it a
 ///         valid Uniswap v4 hook and drive the fee ladder, independent of any attack
 ///         scenario. Attack detection lives in {MEVAttackDefenseTest}; raw scoring
 ///         lives in {ScoringOracleTest}.
 /// @dev SCAFFOLD STUB — fixtures (Deployers, HookMiner, dynamic-fee pool) are TODO,
 ///      so every test is skipped until the hook logic is implemented.
 contract HookBehaviorTest is Test {
-    GradientShield internal hook;
+    GradientShieldHook internal hook;
     ScoringOracle internal oracle;
 
     address internal constant SWAPPER = address(0x5AFE);
@@ -22,10 +22,10 @@ contract HookBehaviorTest is Test {
 
     function setUp() public {
         // TODO: deployFreshManagerAndRouters(), mint/approve currencies, deploy oracle,
-        //       mine a hook address with the right permission flags, deploy GradientShield
+        //       mine a hook address with the right permission flags, deploy GradientShieldHook
         //       there, and initialise a DYNAMIC-FEE pool.
         oracle = new ScoringOracle(avs);
-        // hook = GradientShield(minedAddress);
+        // hook = GradientShieldHook(minedAddress);
     }
 
     /// @notice The declared getHookPermissions() must match the flags encoded in the

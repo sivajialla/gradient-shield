@@ -7,7 +7,7 @@ import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {HookMiner} from "@uniswap/v4-periphery/src/utils/HookMiner.sol";
 
-import {GradientShield} from "../src/GradientShield.sol";
+import {GradientShieldHook} from "../src/GradientShieldHook.sol";
 import {ScoringOracle} from "../src/ScoringOracle.sol";
 
 /// @title Deploy
@@ -35,19 +35,19 @@ contract Deploy is Script {
         ScoringOracle oracle = new ScoringOracle(vm.addr(pk));
         console2.log("ScoringOracle:", address(oracle));
 
-        // 2. Mine a hook address with the flags GradientShield declares.
+        // 2. Mine a hook address with the flags GradientShieldHook declares.
         uint160 flags = uint160(
             Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG
         );
 
         bytes memory constructorArgs = abi.encode(IPoolManager(poolManager), oracle);
         (address hookAddress, bytes32 salt) =
-            HookMiner.find(CREATE2_DEPLOYER, flags, type(GradientShield).creationCode, constructorArgs);
+            HookMiner.find(CREATE2_DEPLOYER, flags, type(GradientShieldHook).creationCode, constructorArgs);
 
         // 3. Deploy to the mined address via CREATE2 (salt makes address == hookAddress).
-        GradientShield hook = new GradientShield{salt: salt}(IPoolManager(poolManager), oracle);
+        GradientShieldHook hook = new GradientShieldHook{salt: salt}(IPoolManager(poolManager), oracle);
         require(address(hook) == hookAddress, "Deploy: hook address mismatch");
-        console2.log("GradientShield:", address(hook));
+        console2.log("GradientShieldHook:", address(hook));
 
         // 4. TODO: initialise a dynamic-fee pool that uses this hook, and point the
         //    oracle's AVS writer at the deployed EigenLayer ServiceManager.

@@ -34,7 +34,7 @@ that needs the v4 pool fixtures or unimplemented logic is skipped for now.
 ```
 .
 ├── src/
-│   ├── GradientShield.sol      the hook contract
+│   ├── GradientShieldHook.sol  the hook contract
 │   └── ScoringOracle.sol       per-address score store
 ├── test/
 │   ├── HookBehavior.t.sol      hook-mechanics tests
@@ -53,7 +53,7 @@ that needs the v4 pool fixtures or unimplemented logic is skipped for now.
 
 ### File-by-file
 
-#### `src/GradientShield.sol` — the hook
+#### `src/GradientShieldHook.sol` — the hook
 
 The Uniswap v4 hook itself. Extends `BaseHook` (from v4-periphery) and is the
 contract a pool points at.
@@ -100,7 +100,7 @@ the hook.
 
 #### `test/HookBehavior.t.sol` — hook mechanics
 
-Tests that make GradientShield a *valid, correctly-priced* v4 hook, independent
+Tests that make `GradientShieldHook` a *valid, correctly-priced* v4 hook, independent
 of any attack scenario: `test_permissionsFlags` (declared vs. address flags),
 `test_baseFeeForCleanSwapper` (score 0 → base fee), `test_dynamicFeeOverrideApplied`
 (the fee override is actually charged). All skipped pending pool fixtures.
@@ -122,7 +122,7 @@ Unit tests for the oracle with no hook involved. `test_onlyAvsCanSetScore` and
 
 A `forge script` that deploys the oracle, mines a CREATE2 salt with `HookMiner`
 so the hook lands at an address whose low bits encode its permission flags,
-deploys `GradientShield` to that mined address, and asserts the address matches.
+deploys `GradientShieldHook` to that mined address, and asserts the address matches.
 Reads `POOL_MANAGER` and `PRIVATE_KEY` from the environment. Pool initialisation
 and wiring the real AVS ServiceManager are marked `TODO`.
 
@@ -185,7 +185,7 @@ forge script script/Deploy.s.sol --rpc-url $RPC_URL --private-key $PRIVATE_KEY -
 ## What to build next
 
 1. Implement the `TODO`s in `ScoringOracle` (linear decay, `bumpScore`) and
-   `GradientShield` (sandwich/JIT heuristics, fee override guard).
+   `GradientShieldHook` (sandwich/JIT heuristics, fee override guard).
 2. Wire the v4 test fixtures (`Deployers`, `HookMiner`) and un-skip the tests,
    starting with `test_sandwichBotSimulation`.
 3. Connect `ScoringOracle` to an EigenLayer ServiceManager for real AVS

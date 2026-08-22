@@ -5,11 +5,11 @@ pragma solidity ^0.8.26;
 /// @notice Per-address MEV/bot risk score storage with daily linear decay.
 /// @dev SCAFFOLD STUB — signatures and state are laid out; behavioural logic is
 ///      marked with TODOs. Scores are written by the AVS (EigenLayer operator set)
-///      and read by {GradientShield} on every swap.
+///      and read by {GradientShieldHook} on every swap.
 ///
 /// Score semantics (0–100):
 ///   0–39   : clean / unknown           → base fee
-///   40–79  : suspicious                 → escalated fee (see GradientShield)
+///   40–79  : suspicious                 → escalated fee (see GradientShieldHook)
 ///   80–100 : confirmed toxic flow       → swap rejected
 contract ScoringOracle {
     // ---------------------------------------------------------------------

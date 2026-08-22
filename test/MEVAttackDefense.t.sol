@@ -3,18 +3,18 @@ pragma solidity ^0.8.26;
 
 import {Test, console2} from "forge-std/Test.sol";
 
-import {GradientShield} from "../src/GradientShield.sol";
+import {GradientShieldHook} from "../src/GradientShieldHook.sol";
 import {ScoringOracle} from "../src/ScoringOracle.sol";
 
 /// @title MEVAttackDefenseTest
-/// @notice Tests GradientShield's defenses against MEV attacks — sandwich attacks and
+/// @notice Tests GradientShieldHook's defenses against MEV attacks — sandwich attacks and
 ///         JIT (just-in-time) liquidity — including the full bot score-escalation demo.
 ///         Plain hook mechanics live in {HookBehaviorTest}; raw scoring math lives in
 ///         {ScoringOracleTest}.
 /// @dev SCAFFOLD STUB — fixtures (Deployers, HookMiner, dynamic-fee pool) are TODO,
 ///      so every test is skipped until the detection logic is implemented.
 contract MEVAttackDefenseTest is Test {
-    GradientShield internal hook;
+    GradientShieldHook internal hook;
     ScoringOracle internal oracle;
 
     address internal constant BOT = address(0xB07);
@@ -26,7 +26,7 @@ contract MEVAttackDefenseTest is Test {
         // TODO: deployFreshManagerAndRouters(), mint/approve currencies, deploy oracle,
         //       mine + deploy the hook, initialise a DYNAMIC-FEE pool with seed liquidity.
         oracle = new ScoringOracle(avs);
-        // hook = GradientShield(minedAddress);
+        // hook = GradientShieldHook(minedAddress);
     }
 
     // ---------------------------------------------------------------------
@@ -51,7 +51,7 @@ contract MEVAttackDefenseTest is Test {
         vm.skip(true); // TODO: remove once fixtures + detection logic are implemented.
 
         // ---- 1. Bot front-run + victim + back-run in one block ----
-        // vm.expectEmit(...); emit GradientShield.SandwichDetected(poolId, BOT, block.number);
+        // vm.expectEmit(...); emit GradientShieldHook.SandwichDetected(poolId, BOT, block.number);
         // _swap(BOT, ...); _swap(VICTIM, ...); _swap(BOT, ...);
 
         // ---- 2. AVS scores the bot ----
@@ -59,14 +59,14 @@ contract MEVAttackDefenseTest is Test {
         // assertEq(oracle.getScore(BOT), 60);
 
         // ---- 3. Escalated fee on next attempt ----
-        // vm.expectEmit(...); emit GradientShield.FeeEscalated(poolId, BOT, BASE_FEE, BASE_FEE * 3);
+        // vm.expectEmit(...); emit GradientShieldHook.FeeEscalated(poolId, BOT, BASE_FEE, BASE_FEE * 3);
         // _swap(BOT, ...);
 
         // ---- 4. AVS escalates ----
         // vm.prank(avs); oracle.setScore(BOT, 95);
 
         // ---- 5. Rejection ----
-        // vm.expectRevert(abi.encodeWithSelector(GradientShield.BotRejected.selector, BOT, 95));
+        // vm.expectRevert(abi.encodeWithSelector(GradientShieldHook.BotRejected.selector, BOT, 95));
         // _swap(BOT, ...);
     }
 
@@ -86,7 +86,7 @@ contract MEVAttackDefenseTest is Test {
     // Helpers (stubs)
     // ---------------------------------------------------------------------
 
-    /// @dev TODO: wrap PoolSwapTest.swap(...) with GradientShield-friendly defaults.
+    /// @dev TODO: wrap PoolSwapTest.swap(...) with GradientShieldHook-friendly defaults.
     function _swap(address caller, bool zeroForOne, int256 amountSpecified) internal {
         caller;
         zeroForOne;

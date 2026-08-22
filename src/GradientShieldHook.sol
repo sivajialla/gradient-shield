@@ -13,7 +13,7 @@ import {SwapParams, ModifyLiquidityParams} from "@uniswap/v4-core/src/types/Pool
 
 import {ScoringOracle} from "./ScoringOracle.sol";
 
-/// @title GradientShield
+/// @title GradientShieldHook
 /// @notice Uniswap v4 hook that prices swaps by the swapper's MEV risk score and
 ///         emits telemetry for an off-chain AVS (EigenLayer operator set) to consume.
 /// @dev SCAFFOLD STUB — hook wiring, permissions, events, errors and the fee/detection
@@ -24,7 +24,7 @@ import {ScoringOracle} from "./ScoringOracle.sol";
 ///   score < SUSPICIOUS_THRESHOLD   → base dynamic fee
 ///   score < REJECT_THRESHOLD       → base fee × ESCALATION_MULTIPLIER (FeeEscalated)
 ///   score >= REJECT_THRESHOLD      → revert BotRejected
-contract GradientShield is BaseHook {
+contract GradientShieldHook is BaseHook {
     using PoolIdLibrary for PoolKey;
     using LPFeeLibrary for uint24;
 
@@ -123,7 +123,7 @@ contract GradientShield is BaseHook {
     }
 
     // ---------------------------------------------------------------------
-    // beforeSwap — the core of GradientShield
+    // beforeSwap — the core of GradientShieldHook
     // ---------------------------------------------------------------------
 
     /// @dev Flow (TODO items are the real logic to fill in):
