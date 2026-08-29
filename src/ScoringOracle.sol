@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.27;
+pragma solidity ^0.8.26;
 
 /// @title ScoringOracle
 /// @notice Per-address MEV/bot risk score storage with daily linear decay.

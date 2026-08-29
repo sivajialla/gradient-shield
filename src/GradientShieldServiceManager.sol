@@ -1,161 +1,90 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.27;
+pragma solidity ^0.8.26;
 
-import {ECDSAServiceManagerBase} from
-    "eigenlayer-middleware/src/unaudited/ECDSAServiceManagerBase.sol";
-import {ECDSAStakeRegistry} from "eigenlayer-middleware/src/unaudited/ECDSAStakeRegistry.sol";
-import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {ServiceManagerBase} from "eigenlayer-middleware/src/ServiceManagerBase.sol";
+import {ISlashingRegistryCoordinator} from "eigenlayer-middleware/src/interfaces/ISlashingRegistryCoordinator.sol";
+import {IStakeRegistry} from "eigenlayer-middleware/src/interfaces/IStakeRegistry.sol";
+import {IAVSDirectory} from "eigenlayer-contracts/src/contracts/interfaces/IAVSDirectory.sol";
+import {IRewardsCoordinator} from "eigenlayer-contracts/src/contracts/interfaces/IRewardsCoordinator.sol";
+import {IPermissionController} from "eigenlayer-contracts/src/contracts/interfaces/IPermissionController.sol";
+import {IAllocationManager} from "eigenlayer-contracts/src/contracts/interfaces/IAllocationManager.sol";
 
 import {ScoringOracle} from "./ScoringOracle.sol";
+import {IGradientShieldTaskManager} from "./IGradientShieldTaskManager.sol";
 
 /// @title GradientShieldServiceManager
-/// @notice EigenLayer ECDSA-based AVS service manager for GradientShield.
-///         Inherits from ECDSAServiceManagerBase (real EigenLayer middleware)
-///         and adds MEV score task creation / operator response logic.
-/// @dev Operators register through the ECDSAStakeRegistry, which verifies
-///      stake via EigenLayer's DelegationManager. Task responses are verified
-///      against the operator's registered signing key in the stake registry.
-contract GradientShieldServiceManager is ECDSAServiceManagerBase {
-    using ECDSA for bytes32;
-
-    // -----------------------------------------------------------------
-    // Types
-    // -----------------------------------------------------------------
-
-    struct ScoreTask {
-        address subject;
-        uint32 fromBlock;
-        uint32 toBlock;
-        uint32 createdBlock;
-        bool responded;
-    }
-
+/// @notice EigenLayer BLS-based AVS service manager for GradientShield.
+///         Extends ServiceManagerBase (BLS variant) and links to the
+///         GradientShieldTaskManager which handles BLS-verified score tasks.
+///
+///         Operator registration, BLS key management, and quorum configuration
+///         are handled by the SlashingRegistryCoordinator; this contract provides
+///         the AVS identity layer (metadata, rewards, operator set management).
+contract GradientShieldServiceManager is ServiceManagerBase {
     // -----------------------------------------------------------------
     // State
     // -----------------------------------------------------------------
 
     ScoringOracle public immutable oracle;
-    ScoreTask[] public tasks;
+    IGradientShieldTaskManager public taskManager;
 
     // -----------------------------------------------------------------
     // Events
     // -----------------------------------------------------------------
 
-    event ScoreTaskCreated(uint32 indexed taskId, address indexed subject, uint32 fromBlock, uint32 toBlock);
-    event ScoreTaskResponded(uint32 indexed taskId, address indexed subject, uint16 score, address indexed operator);
+    event TaskManagerUpdated(address indexed oldTaskManager, address indexed newTaskManager);
 
     // -----------------------------------------------------------------
     // Errors
     // -----------------------------------------------------------------
 
-    error TaskAlreadyResponded();
-    error InvalidTaskId();
-    error InvalidSignature();
-    error InvalidBlockRange();
     error ZeroAddress();
-    error OperatorNotRegistered();
 
     // -----------------------------------------------------------------
-    // Constructor
+    // Constructor (implementation — disable initializers via base)
     // -----------------------------------------------------------------
 
     constructor(
-        address _avsDirectory,
-        address _stakeRegistry,
-        address _rewardsCoordinator,
-        address _delegationManager,
-        address _allocationManager,
+        IAVSDirectory _avsDirectory,
+        IRewardsCoordinator _rewardsCoordinator,
+        ISlashingRegistryCoordinator _registryCoordinator,
+        IStakeRegistry _stakeRegistry,
+        IPermissionController _permissionController,
+        IAllocationManager _allocationManager,
         ScoringOracle _oracle
     )
-        ECDSAServiceManagerBase(
+        ServiceManagerBase(
             _avsDirectory,
-            _stakeRegistry,
             _rewardsCoordinator,
-            _delegationManager,
+            _registryCoordinator,
+            _stakeRegistry,
+            _permissionController,
             _allocationManager
         )
     {
         oracle = _oracle;
     }
 
-    function initialize(address initialOwner, address rewardsInitiator) external initializer {
+    // -----------------------------------------------------------------
+    // Initializer (proxy)
+    // -----------------------------------------------------------------
+
+    function initialize(
+        address initialOwner,
+        address rewardsInitiator,
+        IGradientShieldTaskManager _taskManager
+    ) external initializer {
         __ServiceManagerBase_init(initialOwner, rewardsInitiator);
+        taskManager = _taskManager;
     }
 
     // -----------------------------------------------------------------
-    // IServiceManager admin stubs (PermissionController + OperatorSets)
+    // Admin
     // -----------------------------------------------------------------
 
-    function addPendingAdmin(address) external onlyOwner {}
-    function removePendingAdmin(address) external onlyOwner {}
-    function removeAdmin(address) external onlyOwner {}
-    function setAppointee(address, address, bytes4) external onlyOwner {}
-    function removeAppointee(address, address, bytes4) external onlyOwner {}
-    function deregisterOperatorFromOperatorSets(address, uint32[] memory) external onlyStakeRegistry {}
-
-    // -----------------------------------------------------------------
-    // Task creation
-    // -----------------------------------------------------------------
-
-    function createScoreTask(address subject, uint32 fromBlock, uint32 toBlock)
-        external
-        returns (uint32 taskId)
-    {
-        if (subject == address(0)) revert ZeroAddress();
-        if (fromBlock >= toBlock) revert InvalidBlockRange();
-
-        taskId = uint32(tasks.length);
-        tasks.push(
-            ScoreTask({
-                subject: subject,
-                fromBlock: fromBlock,
-                toBlock: toBlock,
-                createdBlock: uint32(block.number),
-                responded: false
-            })
-        );
-
-        emit ScoreTaskCreated(taskId, subject, fromBlock, toBlock);
-    }
-
-    // -----------------------------------------------------------------
-    // Task response (operator submits verified score)
-    // -----------------------------------------------------------------
-
-    function respondToTask(uint32 taskId, uint16 score, bytes calldata signature) external {
-        if (taskId >= tasks.length) revert InvalidTaskId();
-        ScoreTask storage task = tasks[taskId];
-        if (task.responded) revert TaskAlreadyResponded();
-
-        // Verify the caller is a registered operator in the stake registry
-        ECDSAStakeRegistry registry = ECDSAStakeRegistry(stakeRegistry);
-        if (!registry.operatorRegistered(msg.sender)) revert OperatorNotRegistered();
-
-        // Build the message the operator should have signed
-        bytes32 messageHash = keccak256(abi.encodePacked(taskId, task.subject, score));
-        bytes32 ethSignedHash = ECDSA.toEthSignedMessageHash(messageHash);
-
-        // Recover signer and verify it matches the operator's registered signing key
-        address signer = ethSignedHash.recover(signature);
-        address registeredKey = registry.getLatestOperatorSigningKey(msg.sender);
-        if (signer != registeredKey) revert InvalidSignature();
-
-        // Mark responded and write the score
-        task.responded = true;
-        oracle.setScore(task.subject, score);
-
-        emit ScoreTaskResponded(taskId, task.subject, score, msg.sender);
-    }
-
-    // -----------------------------------------------------------------
-    // Views
-    // -----------------------------------------------------------------
-
-    function taskCount() external view returns (uint32) {
-        return uint32(tasks.length);
-    }
-
-    function getTask(uint32 taskId) external view returns (ScoreTask memory) {
-        return tasks[taskId];
+    function setTaskManager(IGradientShieldTaskManager _taskManager) external onlyOwner {
+        if (address(_taskManager) == address(0)) revert ZeroAddress();
+        emit TaskManagerUpdated(address(taskManager), address(_taskManager));
+        taskManager = _taskManager;
     }
 }

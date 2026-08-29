@@ -1,95 +1,182 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.27;
+pragma solidity ^0.8.26;
 
 import {Test, console2} from "forge-std/Test.sol";
+import {Deployers} from "@uniswap/v4-core/test/utils/Deployers.sol";
+import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
+import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {LPFeeLibrary} from "@uniswap/v4-core/src/libraries/LPFeeLibrary.sol";
+import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {SwapParams, ModifyLiquidityParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
+import {PoolSwapTest} from "@uniswap/v4-core/src/test/PoolSwapTest.sol";
+import {PoolModifyLiquidityTest} from "@uniswap/v4-core/src/test/PoolModifyLiquidityTest.sol";
+import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
+import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
+import {HookMiner} from "@uniswap/v4-periphery/src/utils/HookMiner.sol";
+import {CustomRevert} from "@uniswap/v4-core/src/libraries/CustomRevert.sol";
 
 import {GradientShieldHook} from "../src/GradientShieldHook.sol";
 import {ScoringOracle} from "../src/ScoringOracle.sol";
 
-/// @title MEVAttackDefenseTest
-/// @notice Tests GradientShieldHook's defenses against MEV attacks — sandwich attacks and
-///         JIT (just-in-time) liquidity — including the full bot score-escalation demo.
-///         Plain hook mechanics live in {HookBehaviorTest}; raw scoring math lives in
-///         {ScoringOracleTest}.
-/// @dev SCAFFOLD STUB — fixtures (Deployers, HookMiner, dynamic-fee pool) are TODO,
-///      so every test is skipped until the detection logic is implemented.
-contract MEVAttackDefenseTest is Test {
+contract MEVAttackDefenseTest is Test, Deployers {
+    using PoolIdLibrary for PoolKey;
+
     GradientShieldHook internal hook;
     ScoringOracle internal oracle;
 
-    address internal constant BOT = address(0xB07);
-    address internal constant VICTIM = address(0xF1CE);
-    address internal constant LP = address(0x11D);
+    PoolSwapTest internal botRouter;
+    PoolSwapTest internal victimRouter;
+    PoolModifyLiquidityTest internal jitLPRouter;
+
     address internal avs = address(0xA75);
 
     function setUp() public {
-        // TODO: deployFreshManagerAndRouters(), mint/approve currencies, deploy oracle,
-        //       mine + deploy the hook, initialise a DYNAMIC-FEE pool with seed liquidity.
+        deployFreshManagerAndRouters();
+
         oracle = new ScoringOracle(avs);
-        // hook = GradientShieldHook(minedAddress);
+
+        uint160 flags = uint160(
+            Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG
+        );
+
+        (address hookAddr, bytes32 salt) = HookMiner.find(
+            address(this),
+            flags,
+            type(GradientShieldHook).creationCode,
+            abi.encode(manager, oracle)
+        );
+        hook = new GradientShieldHook{salt: salt}(IPoolManager(manager), oracle);
+        require(address(hook) == hookAddr, "hook address mismatch");
+
+        deployMintAndApprove2Currencies();
+
+        botRouter = new PoolSwapTest(manager);
+        victimRouter = new PoolSwapTest(manager);
+        jitLPRouter = new PoolModifyLiquidityTest(manager);
+
+        MockERC20 token0 = MockERC20(Currency.unwrap(currency0));
+        MockERC20 token1 = MockERC20(Currency.unwrap(currency1));
+        token0.approve(address(botRouter), type(uint256).max);
+        token1.approve(address(botRouter), type(uint256).max);
+        token0.approve(address(victimRouter), type(uint256).max);
+        token1.approve(address(victimRouter), type(uint256).max);
+        token0.approve(address(jitLPRouter), type(uint256).max);
+        token1.approve(address(jitLPRouter), type(uint256).max);
+
+        (key,) = initPoolAndAddLiquidity(
+            currency0, currency1, IHooks(address(hook)), LPFeeLibrary.DYNAMIC_FEE_FLAG, SQRT_PRICE_1_1
+        );
     }
 
     // ---------------------------------------------------------------------
-    // Sandwich attacks
+    // Sandwich detection
     // ---------------------------------------------------------------------
 
-    /// @notice A front-run + victim + back-run pattern in one block trips the
-    ///         in-hook heuristic and emits SandwichDetected.
     function test_sandwichPatternIsDetected() public {
-        // TODO: _swap(BOT, front); _swap(VICTIM, ...); expect SandwichDetected on
-        //       _swap(BOT, back).
-        vm.skip(true);
+        PoolId poolId = key.toId();
+
+        _swapVia(botRouter, true, -10);
+        _swapVia(victimRouter, true, -10);
+
+        vm.expectEmit(true, true, false, true);
+        emit GradientShieldHook.SandwichDetected(poolId, address(botRouter), block.number);
+        _swapVia(botRouter, false, -10);
     }
 
-    /// @notice The headline demo (README Step 4): bot score escalation end-to-end.
-    ///   1. Bot sandwiches a victim (swap succeeds, SandwichDetected fires).
-    ///   2. AVS updates bot score to 60.
-    ///   3. Bot swaps again → pays 3x fee (FeeEscalated fires).
-    ///   4. AVS escalates score to 95.
-    ///   5. Bot swaps again → rejected (BotRejected revert).
-    function test_sandwichBotSimulation() public {
-        vm.skip(true); // TODO: remove once fixtures + detection logic are implemented.
+    function test_noSandwichWithoutVictim() public {
+        _swapVia(botRouter, true, -10);
+        _swapVia(botRouter, false, -10);
+    }
 
-        // ---- 1. Bot front-run + victim + back-run in one block ----
-        // vm.expectEmit(...); emit GradientShieldHook.SandwichDetected(poolId, BOT, block.number);
-        // _swap(BOT, ...); _swap(VICTIM, ...); _swap(BOT, ...);
+    function test_noSandwichAcrossBlocks() public {
+        _swapVia(botRouter, true, -10);
+        _swapVia(victimRouter, true, -10);
 
-        // ---- 2. AVS scores the bot ----
-        // vm.prank(avs); oracle.setScore(BOT, 60);
-        // assertEq(oracle.getScore(BOT), 60);
+        vm.roll(block.number + 1);
 
-        // ---- 3. Escalated fee on next attempt ----
-        // vm.expectEmit(...); emit GradientShieldHook.FeeEscalated(poolId, BOT, BASE_FEE, BASE_FEE * 3);
-        // _swap(BOT, ...);
+        _swapVia(botRouter, false, -10);
+    }
 
-        // ---- 4. AVS escalates ----
-        // vm.prank(avs); oracle.setScore(BOT, 95);
+    function test_sandwichBotEscalation() public {
+        PoolId poolId = key.toId();
 
-        // ---- 5. Rejection ----
-        // vm.expectRevert(abi.encodeWithSelector(GradientShieldHook.BotRejected.selector, BOT, 95));
-        // _swap(BOT, ...);
+        // 1. Bot sandwiches a victim (detected).
+        _swapVia(botRouter, true, -10);
+        _swapVia(victimRouter, true, -10);
+
+        vm.expectEmit(true, true, false, true);
+        emit GradientShieldHook.SandwichDetected(poolId, address(botRouter), block.number);
+        _swapVia(botRouter, false, -10);
+
+        // 2. AVS scores the bot at 60 (suspicious band).
+        vm.prank(avs);
+        oracle.setScore(address(botRouter), 60);
+        assertEq(oracle.getScore(address(botRouter)), 60);
+
+        // 3. Bot's next swap pays 3x fee.
+        vm.roll(block.number + 1);
+        vm.expectEmit(true, true, false, true);
+        emit GradientShieldHook.FeeEscalated(poolId, address(botRouter), 3000, 9000);
+        _swapVia(botRouter, true, -10);
+
+        // 4. AVS escalates to 95 (reject band).
+        vm.prank(avs);
+        oracle.setScore(address(botRouter), 95);
+
+        // 5. Bot's next swap is rejected.
+        vm.roll(block.number + 1);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CustomRevert.WrappedError.selector,
+                address(hook),
+                IHooks.beforeSwap.selector,
+                abi.encodeWithSelector(GradientShieldHook.BotRejected.selector, address(botRouter), uint16(95)),
+                abi.encodeWithSelector(Hooks.HookCallFailed.selector)
+            )
+        );
+        _swapVia(botRouter, true, -10);
     }
 
     // ---------------------------------------------------------------------
-    // JIT (just-in-time) liquidity
+    // JIT liquidity detection
     // ---------------------------------------------------------------------
 
-    /// @notice Adding then removing liquidity around a single swap (same block) trips
-    ///         the JIT heuristic and emits JITDetected.
     function test_jitLiquidityIsDetected() public {
-        // TODO: addLiquidity(LP); _swap(VICTIM, ...); removeLiquidity(LP) — expect
-        //       JITDetected for LP.
-        vm.skip(true);
+        PoolId poolId = key.toId();
+
+        jitLPRouter.modifyLiquidity(key, LIQUIDITY_PARAMS, ZERO_BYTES);
+        _swapVia(victimRouter, true, -10);
+
+        vm.expectEmit(true, true, false, true);
+        emit GradientShieldHook.JITDetected(poolId, address(jitLPRouter), block.number);
+        jitLPRouter.modifyLiquidity(key, REMOVE_LIQUIDITY_PARAMS, ZERO_BYTES);
+    }
+
+    function test_noJITAcrossBlocks() public {
+        jitLPRouter.modifyLiquidity(key, LIQUIDITY_PARAMS, ZERO_BYTES);
+
+        vm.roll(block.number + 1);
+
+        jitLPRouter.modifyLiquidity(key, REMOVE_LIQUIDITY_PARAMS, ZERO_BYTES);
     }
 
     // ---------------------------------------------------------------------
-    // Helpers (stubs)
+    // Helpers
     // ---------------------------------------------------------------------
 
-    /// @dev TODO: wrap PoolSwapTest.swap(...) with GradientShieldHook-friendly defaults.
-    function _swap(address caller, bool zeroForOne, int256 amountSpecified) internal {
-        caller;
-        zeroForOne;
-        amountSpecified;
+    function _swapVia(PoolSwapTest router, bool zeroForOne, int256 amountSpecified) internal {
+        router.swap(
+            key,
+            SwapParams({
+                zeroForOne: zeroForOne,
+                amountSpecified: amountSpecified,
+                sqrtPriceLimitX96: zeroForOne ? MIN_PRICE_LIMIT : MAX_PRICE_LIMIT
+            }),
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false}),
+            ZERO_BYTES
+        );
     }
 }

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.27;
+pragma solidity ^0.8.26;
 
 import {Script, console2} from "forge-std/Script.sol";
 
@@ -7,20 +7,31 @@ import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {HookMiner} from "@uniswap/v4-periphery/src/utils/HookMiner.sol";
 
-import {ECDSAStakeRegistry} from "eigenlayer-middleware/src/unaudited/ECDSAStakeRegistry.sol";
-import {IDelegationManager} from "eigenlayer-contracts/src/contracts/interfaces/IDelegationManager.sol";
-import {IECDSAStakeRegistryTypes} from "eigenlayer-middleware/src/interfaces/IECDSAStakeRegistry.sol";
-import {IStrategy} from "eigenlayer-contracts/src/contracts/interfaces/IStrategy.sol";
+import {ISlashingRegistryCoordinator} from "eigenlayer-middleware/src/interfaces/ISlashingRegistryCoordinator.sol";
+import {IStakeRegistry} from "eigenlayer-middleware/src/interfaces/IStakeRegistry.sol";
+import {IAVSDirectory} from "eigenlayer-contracts/src/contracts/interfaces/IAVSDirectory.sol";
+import {IRewardsCoordinator} from "eigenlayer-contracts/src/contracts/interfaces/IRewardsCoordinator.sol";
+import {IPermissionController} from "eigenlayer-contracts/src/contracts/interfaces/IPermissionController.sol";
+import {IAllocationManager} from "eigenlayer-contracts/src/contracts/interfaces/IAllocationManager.sol";
+import {IPauserRegistry} from "eigenlayer-contracts/src/contracts/interfaces/IPauserRegistry.sol";
 
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
 import {GradientShieldHook} from "../src/GradientShieldHook.sol";
 import {GradientShieldServiceManager} from "../src/GradientShieldServiceManager.sol";
+import {GradientShieldTaskManager} from "../src/GradientShieldTaskManager.sol";
+import {IGradientShieldTaskManager} from "../src/IGradientShieldTaskManager.sol";
 import {ScoringOracle} from "../src/ScoringOracle.sol";
 
 /// @title Deploy
-/// @notice Testnet deployment with CREATE2 hook-address mining.
-/// @dev Requires EigenLayer core contracts to be deployed on the target chain.
+/// @notice Mainnet/testnet deployment for BLS-based GradientShield AVS.
+/// @dev Requires EigenLayer core + BLS infrastructure (RegistryCoordinator,
+///      BLSApkRegistry, StakeRegistry) already deployed on the target chain.
+///
+/// Required env vars:
+///   PRIVATE_KEY, POOL_MANAGER, REGISTRY_COORDINATOR, STAKE_REGISTRY,
+///   AVS_DIRECTORY, REWARDS_COORDINATOR, PERMISSION_CONTROLLER,
+///   ALLOCATION_MANAGER, PAUSER_REGISTRY, AGGREGATOR, GENERATOR
 contract Deploy is Script {
     address internal constant CREATE2_DEPLOYER = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
 
@@ -30,7 +41,7 @@ contract Deploy is Script {
 
         vm.startBroadcast(pk);
 
-        (ScoringOracle oracle, GradientShieldServiceManager sm) = _deployAVS(deployer);
+        (ScoringOracle oracle,) = _deployAVS(deployer);
         _deployHook(oracle);
 
         vm.stopBroadcast();
@@ -43,37 +54,46 @@ contract Deploy is Script {
         oracle = new ScoringOracle(address(0));
         console2.log("ScoringOracle:", address(oracle));
 
-        ECDSAStakeRegistry stakeRegistry = new ECDSAStakeRegistry(
-            IDelegationManager(vm.envAddress("DELEGATION_MANAGER"))
-        );
-        console2.log("ECDSAStakeRegistry:", address(stakeRegistry));
+        ISlashingRegistryCoordinator registryCoordinator =
+            ISlashingRegistryCoordinator(vm.envAddress("REGISTRY_COORDINATOR"));
 
-        GradientShieldServiceManager impl = new GradientShieldServiceManager(
-            vm.envAddress("AVS_DIRECTORY"),
-            address(stakeRegistry),
-            vm.envAddress("REWARDS_COORDINATOR"),
-            vm.envAddress("DELEGATION_MANAGER"),
-            vm.envAddress("ALLOCATION_MANAGER"),
+        // Deploy TaskManager (BLS-verified scoring)
+        GradientShieldTaskManager tmImpl = new GradientShieldTaskManager(
+            registryCoordinator,
+            IPauserRegistry(vm.envAddress("PAUSER_REGISTRY")),
+            100 // 100-block response window
+        );
+        ERC1967Proxy tmProxy = new ERC1967Proxy(
+            address(tmImpl),
+            abi.encodeCall(
+                GradientShieldTaskManager.initialize,
+                (deployer, vm.envAddress("AGGREGATOR"), vm.envAddress("GENERATOR"), oracle)
+            )
+        );
+        GradientShieldTaskManager tm = GradientShieldTaskManager(address(tmProxy));
+        console2.log("TaskManager (proxy):", address(tm));
+
+        // Deploy ServiceManager (AVS identity layer)
+        GradientShieldServiceManager smImpl = new GradientShieldServiceManager(
+            IAVSDirectory(vm.envAddress("AVS_DIRECTORY")),
+            IRewardsCoordinator(vm.envAddress("REWARDS_COORDINATOR")),
+            registryCoordinator,
+            IStakeRegistry(vm.envAddress("STAKE_REGISTRY")),
+            IPermissionController(vm.envAddress("PERMISSION_CONTROLLER")),
+            IAllocationManager(vm.envAddress("ALLOCATION_MANAGER")),
             oracle
         );
-        ERC1967Proxy proxy = new ERC1967Proxy(
-            address(impl),
-            abi.encodeCall(GradientShieldServiceManager.initialize, (deployer, deployer))
+        ERC1967Proxy smProxy = new ERC1967Proxy(
+            address(smImpl),
+            abi.encodeCall(
+                GradientShieldServiceManager.initialize,
+                (deployer, deployer, IGradientShieldTaskManager(address(tm)))
+            )
         );
-        sm = GradientShieldServiceManager(address(proxy));
+        sm = GradientShieldServiceManager(address(smProxy));
         console2.log("ServiceManager (proxy):", address(sm));
 
-        IECDSAStakeRegistryTypes.StrategyParams[] memory sp =
-            new IECDSAStakeRegistryTypes.StrategyParams[](1);
-        sp[0] = IECDSAStakeRegistryTypes.StrategyParams({
-            strategy: IStrategy(vm.envAddress("STRATEGY")),
-            multiplier: 10_000
-        });
-        stakeRegistry.initialize(
-            address(sm), 0, IECDSAStakeRegistryTypes.Quorum({strategies: sp})
-        );
-
-        oracle.setAvs(address(sm));
+        oracle.setAvs(address(tm));
     }
 
     function _deployHook(ScoringOracle oracle) internal {

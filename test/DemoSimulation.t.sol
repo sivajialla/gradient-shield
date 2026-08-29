@@ -1,34 +1,28 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.27;
+pragma solidity ^0.8.26;
 
 import {Test, console2} from "forge-std/Test.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
-import {GradientShieldServiceManager} from "../src/GradientShieldServiceManager.sol";
-import {GradientShieldHook} from "../src/GradientShieldHook.sol";
+import {GradientShieldTaskManager} from "../src/GradientShieldTaskManager.sol";
+import {IGradientShieldTaskManager} from "../src/IGradientShieldTaskManager.sol";
 import {ScoringOracle} from "../src/ScoringOracle.sol";
 
-import {ECDSAStakeRegistry} from "eigenlayer-middleware/src/unaudited/ECDSAStakeRegistry.sol";
-import {IECDSAStakeRegistryTypes} from "eigenlayer-middleware/src/interfaces/IECDSAStakeRegistry.sol";
-import {IDelegationManager} from "eigenlayer-contracts/src/contracts/interfaces/IDelegationManager.sol";
-import {ISignatureUtilsMixinTypes} from
-    "eigenlayer-contracts/src/contracts/interfaces/ISignatureUtilsMixin.sol";
-import {IStrategy} from "eigenlayer-contracts/src/contracts/interfaces/IStrategy.sol";
+import {ISlashingRegistryCoordinator} from "eigenlayer-middleware/src/interfaces/ISlashingRegistryCoordinator.sol";
+import {IBLSSignatureChecker} from "eigenlayer-middleware/src/interfaces/IBLSSignatureChecker.sol";
+import {IPauserRegistry} from "eigenlayer-contracts/src/contracts/interfaces/IPauserRegistry.sol";
+import {BN254} from "eigenlayer-middleware/src/libraries/BN254.sol";
 
-import {DelegationMock} from "eigenlayer-middleware/test/mocks/DelegationMock.sol";
-import {AVSDirectoryMock} from "eigenlayer-middleware/test/mocks/AVSDirectoryMock.sol";
-import {AllocationManagerMock} from "eigenlayer-middleware/test/mocks/AllocationManagerMock.sol";
-import {RewardsCoordinatorMock} from "eigenlayer-middleware/test/mocks/RewardsCoordinatorMock.sol";
-import {ERC20Mock} from "eigenlayer-middleware/test/mocks/ERC20Mock.sol";
+// Re-use the same test mocks from TaskManager.t.sol
+import {MockPauserRegistry, TestableGradientShieldTaskManager} from "./TaskManager.t.sol";
 
 contract DemoSimulationTest is Test {
     ScoringOracle internal oracle;
-    GradientShieldServiceManager internal sm;
-    ECDSAStakeRegistry internal stakeRegistry;
+    TestableGradientShieldTaskManager internal tm;
 
-    uint256 internal operatorPk = 0xA11CE;
-    address internal operatorAddr;
-    address internal deployer = address(0xDEAD);
+    address internal aggregator = address(0xA66);
+    address internal generator = address(0x6E11);
+    address internal owner = address(0xDEAD);
 
     address internal constant CLEAN_TRADER = address(0x1111);
     address internal constant OCCASIONAL_MEV = address(0x2222);
@@ -41,57 +35,36 @@ contract DemoSimulationTest is Test {
     uint24 internal constant ESCALATION_MULTIPLIER = 3;
 
     function setUp() public {
-        operatorAddr = vm.addr(operatorPk);
+        address mockRC = address(0xC0C0);
+        address mockSR = address(0x5757);
+        address mockAPK = address(0xA9A9);
+        address mockDel = address(0xDE1E);
 
-        DelegationMock delegationMock = new DelegationMock();
-        AVSDirectoryMock avsDirectoryMock = new AVSDirectoryMock();
-        AllocationManagerMock allocationManagerMock = new AllocationManagerMock();
-        RewardsCoordinatorMock rewardsCoordinatorMock = new RewardsCoordinatorMock();
+        vm.mockCall(mockRC, abi.encodeWithSignature("stakeRegistry()"), abi.encode(mockSR));
+        vm.mockCall(mockRC, abi.encodeWithSignature("blsApkRegistry()"), abi.encode(mockAPK));
+        vm.mockCall(mockSR, abi.encodeWithSignature("delegation()"), abi.encode(mockDel));
 
-        stakeRegistry = new ECDSAStakeRegistry(IDelegationManager(address(delegationMock)));
+        IPauserRegistry pauserReg = new MockPauserRegistry();
+
         oracle = new ScoringOracle(address(0));
 
-        GradientShieldServiceManager impl = new GradientShieldServiceManager(
-            address(avsDirectoryMock),
-            address(stakeRegistry),
-            address(rewardsCoordinatorMock),
-            address(delegationMock),
-            address(allocationManagerMock),
-            oracle
+        TestableGradientShieldTaskManager impl = new TestableGradientShieldTaskManager(
+            ISlashingRegistryCoordinator(mockRC), pauserReg, 100
         );
+
         ERC1967Proxy proxy = new ERC1967Proxy(
             address(impl),
-            abi.encodeCall(GradientShieldServiceManager.initialize, (deployer, deployer))
+            abi.encodeCall(GradientShieldTaskManager.initialize, (owner, aggregator, generator, oracle))
         );
-        sm = GradientShieldServiceManager(address(proxy));
-
-        IStrategy mockStrategy = IStrategy(address(new ERC20Mock()));
-        IECDSAStakeRegistryTypes.StrategyParams[] memory strategyParams =
-            new IECDSAStakeRegistryTypes.StrategyParams[](1);
-        strategyParams[0] = IECDSAStakeRegistryTypes.StrategyParams({
-            strategy: mockStrategy,
-            multiplier: 10_000
-        });
-        stakeRegistry.initialize(
-            address(sm), 0, IECDSAStakeRegistryTypes.Quorum({strategies: strategyParams})
-        );
-
-        oracle.setAvs(address(sm));
-
-        delegationMock.setIsOperator(operatorAddr, true);
-        delegationMock.setOperatorShares(operatorAddr, mockStrategy, 1000 ether);
-
-        ISignatureUtilsMixinTypes.SignatureWithSaltAndExpiry memory emptySig;
-        emptySig.expiry = type(uint256).max;
-        vm.prank(operatorAddr);
-        stakeRegistry.registerOperatorWithSignature(emptySig, operatorAddr);
+        tm = TestableGradientShieldTaskManager(address(proxy));
+        oracle.setAvs(address(tm));
     }
 
     // =================================================================
     //  DEMO 1: Clean trader - never flagged
     // =================================================================
 
-    function test_demo_cleanTrader() public {
+    function test_demo_cleanTrader() public view {
         console2.log("");
         console2.log("=== DEMO 1: Clean Trader (0x1111) ===");
 
@@ -116,8 +89,8 @@ contract DemoSimulationTest is Test {
         console2.log("=== DEMO 2: Occasional MEV Extractor (0x2222) ===");
 
         console2.log("");
-        console2.log("  Day 0: AVS detects suspicious activity");
-        _operatorScores(OCCASIONAL_MEV, 100, 200, 40);
+        console2.log("  Day 0: BLS quorum detects suspicious activity");
+        _quorumScores(OCCASIONAL_MEV, 100, 200, 40);
 
         uint16 score = oracle.getScore(OCCASIONAL_MEV);
         (string memory band, uint24 fee) = _feeDecision(score);
@@ -161,8 +134,8 @@ contract DemoSimulationTest is Test {
         console2.log("=== DEMO 3: Persistent Sandwich Bot (0x3333) ===");
 
         console2.log("");
-        console2.log("  Round 1: First sandwich detected");
-        _operatorScores(SANDWICH_BOT, 100, 200, 55);
+        console2.log("  Round 1: First sandwich detected, BLS quorum agrees score=55");
+        _quorumScores(SANDWICH_BOT, 100, 200, 55);
 
         uint16 score = oracle.getScore(SANDWICH_BOT);
         (string memory band, uint24 fee) = _feeDecision(score);
@@ -174,9 +147,9 @@ contract DemoSimulationTest is Test {
         assertEq(fee, BASE_FEE * ESCALATION_MULTIPLIER);
 
         console2.log("");
-        console2.log("  Round 2 (1 day later): Bot keeps sandwiching");
+        console2.log("  Round 2 (1 day later): Bot keeps sandwiching, quorum bumps");
         vm.warp(block.timestamp + 1 days);
-        _operatorBumps(SANDWICH_BOT, 200, 300, 25);
+        _quorumBumps(SANDWICH_BOT, 200, 300, 25);
 
         score = oracle.getScore(SANDWICH_BOT);
         (band, fee) = _feeDecision(score);
@@ -188,7 +161,7 @@ contract DemoSimulationTest is Test {
 
         console2.log("");
         console2.log("  Round 3 (same day): Bot STILL at it");
-        _operatorBumps(SANDWICH_BOT, 300, 400, 20);
+        _quorumBumps(SANDWICH_BOT, 300, 400, 20);
 
         score = oracle.getScore(SANDWICH_BOT);
         (band, fee) = _feeDecision(score);
@@ -209,8 +182,8 @@ contract DemoSimulationTest is Test {
         console2.log("=== DEMO 4: Reformed Bot (0x4444) ===");
 
         console2.log("");
-        console2.log("  Day 0: Caught in an aggressive sandwich, scored 85");
-        _operatorScores(REFORMED_BOT, 100, 200, 85);
+        console2.log("  Day 0: Caught in an aggressive sandwich, BLS quorum scores 85");
+        _quorumScores(REFORMED_BOT, 100, 200, 85);
 
         uint16 score = oracle.getScore(REFORMED_BOT);
         console2.log("  Score:    ", score);
@@ -268,9 +241,9 @@ contract DemoSimulationTest is Test {
         console2.log("=== DEMO 5: Side-by-Side - Same Pool, Same Block ===");
         console2.log("");
 
-        _operatorScores(OCCASIONAL_MEV, 100, 200, 35);
-        _operatorScores(SANDWICH_BOT, 100, 200, 60);
-        _operatorScores(REFORMED_BOT, 100, 200, 90);
+        _quorumScores(OCCASIONAL_MEV, 100, 200, 35);
+        _quorumScores(SANDWICH_BOT, 100, 200, 60);
+        _quorumScores(REFORMED_BOT, 100, 200, 90);
 
         console2.log("  Four addresses swap in the same block:");
         console2.log("  -----------------------------------------------");
@@ -297,22 +270,44 @@ contract DemoSimulationTest is Test {
     //  Internal helpers
     // =================================================================
 
-    function _operatorScores(address subject, uint32 fromBlock, uint32 toBlock, uint16 score) internal {
-        uint32 taskId = sm.createScoreTask(subject, fromBlock, toBlock);
-
-        bytes32 messageHash = keccak256(abi.encodePacked(taskId, subject, score));
-        bytes32 ethSignedHash = _toEthSignedMessageHash(messageHash);
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(operatorPk, ethSignedHash);
-
-        vm.prank(operatorAddr);
-        sm.respondToTask(taskId, score, abi.encodePacked(r, s, v));
+    function _emptyNonSignerSig()
+        internal
+        pure
+        returns (IBLSSignatureChecker.NonSignerStakesAndSignature memory sig)
+    {
+        sig.apkG2 = BN254.G2Point([uint256(0), uint256(0)], [uint256(0), uint256(0)]);
+        sig.sigma = BN254.G1Point(0, 0);
     }
 
-    function _operatorBumps(address subject, uint32 fromBlock, uint32 toBlock, uint16 delta) internal {
+    function _quorumScores(address subject, uint256 fromBlock, uint256 toBlock, uint16 score) internal {
+        uint32 taskIndex = tm.taskNumber();
+
+        vm.prank(generator);
+        tm.createScoreTask(subject, fromBlock, toBlock, 67, hex"00");
+
+        IGradientShieldTaskManager.ScoreTask memory task = IGradientShieldTaskManager.ScoreTask({
+            subject: subject,
+            fromBlock: fromBlock,
+            toBlock: toBlock,
+            taskCreatedBlock: uint32(block.number),
+            quorumNumbers: hex"00",
+            quorumThresholdPercentage: 67
+        });
+
+        IGradientShieldTaskManager.ScoreTaskResponse memory response = IGradientShieldTaskManager.ScoreTaskResponse({
+            referenceTaskIndex: taskIndex,
+            score: score
+        });
+
+        vm.prank(aggregator);
+        tm.respondToScoreTask(task, response, _emptyNonSignerSig());
+    }
+
+    function _quorumBumps(address subject, uint256 fromBlock, uint256 toBlock, uint16 delta) internal {
         uint16 current = oracle.getScore(subject);
         uint16 newScore = current + delta;
         if (newScore > 100) newScore = 100;
-        _operatorScores(subject, fromBlock, toBlock, newScore);
+        _quorumScores(subject, fromBlock, toBlock, newScore);
     }
 
     function _feeDecision(uint16 score) internal pure returns (string memory band, uint24 fee) {
@@ -323,9 +318,5 @@ contract DemoSimulationTest is Test {
         } else {
             return ("CLEAN", BASE_FEE);
         }
-    }
-
-    function _toEthSignedMessageHash(bytes32 hash) internal pure returns (bytes32) {
-        return keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", hash));
     }
 }

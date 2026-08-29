@@ -1,102 +1,184 @@
 # GradientShield
 
-A Uniswap v4 hook that prices swaps by the swapper's MEV-risk score and emits
-telemetry for an off-chain EigenLayer AVS to consume. Suspicious swappers pay an
-escalated fee; confirmed toxic flow is rejected outright.
+A Uniswap v4 hook that prices swaps by the swapper's MEV-risk score, enforced by
+a BLS multi-operator quorum through an EigenLayer AVS. Suspicious swappers pay an
+escalated fee; confirmed toxic flow is rejected outright. On-chain sandwich and
+JIT liquidity detection feed the scoring pipeline.
 
 # Project Number : HK-UHI10-1050
 
-> **Status: scaffold.** The project structure, contract interfaces, events,
-> errors, hook permissions, and the deployment/test harness are in place and
-> `forge build` / `forge test` pass. The actual fee math, JIT/sandwich
-> heuristics, score decay, and AVS signature verification are stubbed out and
-> marked with `TODO`. See [What to build next](#what-to-build-next).
+> **52 tests passing, 0 skipped.** Hook logic, BLS task manager, oracle decay,
+> sandwich/JIT detection, and the full escalation flow are implemented and tested.
 
 ---
 
 ## How GradientShield works
 
-Instead of a binary allow/deny, the hook maps a continuous **0–100 risk score**
+Instead of a binary allow/deny, the hook maps a continuous **0-100 risk score**
 onto a **graded fee response** — clean flow pays the base fee, suspicious flow
 pays triple, and confirmed toxic flow is rejected outright. The name is the
 mechanism: a *gradient* that *shields* the pool.
 
-Two systems work together:
+Three systems work together:
 
-1. **On-chain (deterministic):** `GradientShieldHook` runs inside the
+1. **On-chain hook (deterministic):** `GradientShieldHook` runs inside the
    PoolManager's `beforeSwap` callback. It reads one number from the
-   `ScoringOracle`, makes a fee decision, and emits telemetry — all
-   synchronous, all in the same transaction.
+   `ScoringOracle`, makes a fee decision, detects sandwich/JIT patterns, and
+   emits telemetry — all synchronous, all in the same transaction.
 
-2. **Off-chain (the feedback loop):** An EigenLayer AVS operator indexes the
-   emitted `SwapTelemetry` events, computes MEV/sandwich scores across blocks,
-   and writes updated scores back to the oracle via `setScore`. This is the loop
-   that makes the response *escalate over time*.
+2. **On-chain BLS task manager (consensus):** `GradientShieldTaskManager` accepts
+   scoring tasks and verifies BLS-aggregated signatures from the operator quorum
+   via `BLSSignatureChecker`. A 100-block challenge window allows disputes before
+   a score becomes final.
+
+3. **Off-chain (the feedback loop):** EigenLayer AVS operators index the emitted
+   `SwapTelemetry` events, independently compute MEV/sandwich scores, reach BLS
+   consensus off-chain, and the aggregator submits the verified score to the
+   oracle. This is the loop that makes the response *escalate over time*.
 
 ### Architecture & data flow
 
 ```mermaid
 flowchart LR
     subgraph ON-CHAIN
-        A[Swapper<br><i>EOA / MEV bot</i>] -->|"swap()"| B[PoolManager<br><i>uniswap v4-core</i>]
-        B -->|"sender"| C["<b>GradientShieldHook</b><br>beforeSwap()<br><i>score → fee decision</i>"]
-        C -->|"getScore()"| D[ScoringOracle<br><i>score per address</i>]
+        A[Swapper] -->|"swap()"| B[PoolManager]
+        B -->|"sender"| C["GradientShieldHook\nbeforeSwap()"]
+        C -->|"getScore()"| D[ScoringOracle]
         D -->|"uint16"| C
 
         C --> E{Score?}
-        E -->|"0 – 39"| F["✅ Base fee<br>0.30% · pass through"]
-        E -->|"40 – 79"| G["⚠️ Escalated fee<br>3× · FeeEscalated"]
-        E -->|"80 – 100"| H["❌ Rejected<br>revert BotRejected"]
+        E -->|"0-39"| F["Base fee\n0.30%"]
+        E -->|"40-79"| G["3x fee\nFeeEscalated"]
+        E -->|"80-100"| H["Rejected\nBotRejected"]
 
-        F --> I[SwapTelemetry<br><i>event log · every swap</i>]
+        F --> I[SwapTelemetry]
         G --> I
+
+        TM["GradientShieldTaskManager\nBLS quorum verification"] -->|"setScore()"| D
+        SM["GradientShieldServiceManager\nAVS identity layer"] --- TM
     end
 
     subgraph OFF-CHAIN
-        J[AVS Operator<br><i>EigenLayer · indexes & scores</i>]
+        OP1[Operator 1] & OP2[Operator 2] & OP3[Operator N]
+        AGG[Aggregator]
     end
 
-    I -.->|"index events"| J
-    J -.->|"setScore() · AVS-gated"| D
+    I -.->|"index events"| OP1 & OP2 & OP3
+    OP1 & OP2 & OP3 -.->|"BLS partial sigs"| AGG
+    AGG -.->|"respondToScoreTask()\naggregated BLS sig"| TM
 ```
 
-> **Why this split.** Detection that needs cross-transaction, cross-block
-> context is too expensive and too limited to do fully on-chain — so scoring
-> lives in the AVS, while the hook keeps only the cheap, synchronous decision:
-> read one number, price or reject. The oracle is the narrow, verifiable
-> interface between the two, and its daily decay means an address that stops
-> attacking is gradually forgiven rather than permanently banned.
-
-### Score → fee ladder
+### Score fee ladder
 
 | Score | Band | Behaviour | Events |
 |:-----:|:----:|-----------|--------|
-| **0–39** | Clean / unknown | Pays the **base fee** (3000 pips = 0.30%). Swap passes through; telemetry emitted for the AVS. | `SwapTelemetry` |
-| **40–79** | Suspicious | Charged **3× base fee** via dynamic-fee override. Extraction is still possible, just expensive. | `FeeEscalated`, `SwapTelemetry` |
-| **80–100** | Confirmed toxic | Swap **reverts** with `BotRejected`. Nothing settles; the pool never touches the flow. | `BotRejectedEvent` |
+| **0-39** | Clean / unknown | Pays the **base fee** (3000 pips = 0.30%). | `SwapTelemetry` |
+| **40-79** | Suspicious | Charged **3x base fee** via dynamic-fee override. | `FeeEscalated`, `SwapTelemetry` |
+| **80-100** | Confirmed toxic | Swap **reverts** with `BotRejected`. | `BotRejectedEvent` |
 
-### What runs on every swap (`_beforeSwap`)
+### Score decay
 
-The hook's `_beforeSwap` callback is the entire on-chain decision, executed
-synchronously before the pool math:
+Scores decay linearly at **5 points per day**. An address scored 85 (rejected)
+that stops attacking will:
+- Day 1: 80 (still rejected)
+- Day 2: 75 (suspicious, 3x fee)
+- Day 9: 40 (border of suspicious)
+- Day 17: 0 (fully clean)
 
-| Step | Action | Detail |
-|:----:|--------|--------|
-| 1 | **Read the score** | Call `oracle.getScore(sender)` — a decay-adjusted `uint16` for the swapper |
-| 2 | **Hard gate** | If `score ≥ 80`, emit `BotRejectedEvent` and `revert BotRejected`. Transaction dies here |
-| 3 | **Detect the pattern** | Compare against `_lastSwapBlock[pool][sender]` for front-run/back-run cadence → `SandwichDetected` *(TODO)* |
-| 4 | **Price it** | If `score ≥ 40`, fee = `BASE_FEE × 3` and emit `FeeEscalated`; else fee = `BASE_FEE` |
-| 5 | **Emit telemetry** | Log `SwapTelemetry(pool, sender, dir, amount, score, fee, block)` for the AVS to index |
-| 6 | **Return the override** | Hand the pool a dynamic-fee override (`OVERRIDE_FEE_FLAG` set) so the pool charges the chosen fee |
+This prevents permanent bans and lets reformed addresses re-enter the pool.
 
-### Component responsibilities
+---
+
+## On-chain MEV detection
+
+The hook detects two MEV patterns directly on-chain, without waiting for AVS scoring:
+
+### Sandwich detection
+
+Flags an address that swaps in **opposite directions within the same block** on
+the same pool, with at least one intervening swap by a different address (the
+victim). This catches the classic front-run/back-run pattern.
+
+- Tracks per-pool, per-address first-swap direction (`_firstSwap`)
+- Counts total swaps per pool per block (`_blockSwaps`)
+- Requires `count >= 2` (victim swapped between) AND opposite direction
+- Emits `SandwichDetected(poolId, swapper, blockNumber)`
+
+### JIT liquidity detection
+
+Flags an address that adds and removes liquidity **within the same block** on
+the same pool — the hallmark of just-in-time liquidity provision that extracts
+value from pending swaps.
+
+- Records add-liquidity block per (pool, provider) in `_liquidityAdds`
+- Checks on remove-liquidity if add happened same block
+- Emits `JITDetected(poolId, provider, blockNumber)`
+
+---
+
+## BLS multi-operator quorum
+
+GradientShield uses EigenLayer's BLS signature infrastructure for decentralized
+score consensus. Multiple operators must independently agree on a score before
+it can be written on-chain.
+
+### How scoring works
+
+1. **Task creation:** A generator (off-chain watcher) calls
+   `createScoreTask(subject, fromBlock, toBlock, threshold, quorumNumbers)` when
+   suspicious activity is observed.
+
+2. **Operator consensus:** Each registered operator independently computes a
+   score for the target address over the specified block range. They sign the
+   response with their BLS private key.
+
+3. **Aggregation:** The aggregator collects BLS partial signatures, aggregates
+   them into a single signature, and submits `respondToScoreTask()` with the
+   `NonSignerStakesAndSignature` proof.
+
+4. **On-chain verification:** The `BLSSignatureChecker` (inherited from
+   EigenLayer middleware) verifies:
+   - The aggregated BLS signature is valid (BN254 pairing check)
+   - The signed stake meets the quorum threshold percentage
+   - The response is within the `TASK_RESPONSE_WINDOW_BLOCK` (100 blocks)
+
+5. **Score write:** If verification passes, the score is written to the
+   `ScoringOracle`, immediately affecting all subsequent swaps.
+
+### Challenge mechanism
+
+After a score is submitted, anyone can dispute it within
+`TASK_CHALLENGE_WINDOW_BLOCK` (100 blocks) by calling
+`raiseAndResolveChallenge()`. A successful challenge:
+- Invalidates the task response
+- Resets the subject's score to 0
+- Emits `TaskChallengedSuccessfully`
+
+The challenge verifies that the non-signer pubkey hashes match the stored
+signatory record, proving the quorum was not properly formed.
+
+### Why BLS over ECDSA
+
+| Property | ECDSA (single operator) | BLS (multi-operator quorum) |
+|----------|------------------------|----------------------------|
+| Trust model | One operator, one key | N operators must agree |
+| Verification cost | ~30k gas per operator | ~120k gas total (constant) |
+| Signature size | Grows linearly with N | Constant (one G1 point) |
+| Collusion resistance | None | Requires threshold fraction |
+
+---
+
+## Component responsibilities
 
 | Component | Layer | Responsibility |
 |-----------|:-----:|----------------|
-| `GradientShieldHook` | on-chain | The v4 hook. Reads the score in `beforeSwap`, applies the fee ladder, runs sandwich/JIT checks, emits telemetry, returns the fee override. Declares `beforeSwap` + `before{Add,Remove}Liquidity` permissions. |
-| `ScoringOracle` | on-chain | Stores one score per address with a daily linear decay. Reads are open; writes are AVS-gated (`setScore` / `bumpScore`). Owner can rotate the AVS writer. |
-| `PoolManager` | on-chain | Uniswap v4-core. Invokes the hook around each swap and honours the returned dynamic-fee override (pool must be initialised with a dynamic fee). |
-| AVS Operator | off-chain | EigenLayer operator node. Indexes `SwapTelemetry`, computes MEV/sandwich scores off-chain, and writes them back via `setScore`. This is the loop that makes the response escalate. |
+| `GradientShieldHook` | on-chain | The v4 hook. Reads scores, applies the fee ladder, detects sandwich/JIT patterns on-chain, emits telemetry, returns fee overrides. |
+| `ScoringOracle` | on-chain | Stores one score per address with daily linear decay. Reads are open; writes are AVS-gated (`setScore` / `bumpScore`). |
+| `GradientShieldTaskManager` | on-chain | BLS task manager. Creates scoring tasks, verifies BLS-aggregated quorum signatures via `BLSSignatureChecker`, enforces response windows and challenge periods. |
+| `GradientShieldServiceManager` | on-chain | AVS identity layer extending `ServiceManagerBase`. Links to the TaskManager, handles EigenLayer registration and rewards. |
+| `PoolManager` | on-chain | Uniswap v4-core. Invokes the hook and honours dynamic-fee overrides. |
+| AVS Operators | off-chain | EigenLayer operators with BLS keys. Index `SwapTelemetry`, compute scores, sign with BLS. |
+| Aggregator | off-chain | Collects BLS partial signatures, aggregates, and submits to the TaskManager. |
 
 ---
 
@@ -108,168 +190,113 @@ synchronously before the pool math:
 ## Build & test
 
 ```bash
-make build       # forge build
-make test        # forge test -vvv
-make sim         # run just the sandwich-bot escalation demo
+forge build
+forge test -vvv
 ```
 
-Most tests currently `vm.skip(true)` — they are stubs describing the behaviour
-to implement. Two `ScoringOracle` access-control tests already pass; everything
-that needs the v4 pool fixtures or unimplemented logic is skipped for now.
+All 52 tests pass across 6 test suites:
+
+| Suite | Tests | What it covers |
+|-------|:-----:|----------------|
+| `ScoringOracle.t.sol` | 15 | Decay, bump, access control, ownership |
+| `TaskManager.t.sol` | 11 | BLS task lifecycle, response window, challenges |
+| `ServiceManager.t.sol` | 8 | Initialization, task manager linking, ownership |
+| `HookBehavior.t.sol` | 5 | Fee ladder, dynamic fee override, permissions |
+| `MEVAttackDefense.t.sol` | 6 | Sandwich/JIT detection, full escalation flow |
+| `DemoSimulation.t.sol` | 5 | End-to-end scoring scenarios with BLS quorum |
 
 ## Repository layout
 
 ```
 .
 ├── src/
-│   ├── GradientShieldHook.sol  the hook contract
-│   └── ScoringOracle.sol       per-address score store
+│   ├── GradientShieldHook.sol          v4 hook with sandwich/JIT detection
+│   ├── GradientShieldTaskManager.sol   BLS quorum task manager
+│   ├── GradientShieldServiceManager.sol AVS service manager (BLS variant)
+│   ├── IGradientShieldTaskManager.sol  task manager interface & structs
+│   └── ScoringOracle.sol              per-address score store with decay
 ├── test/
-│   ├── HookBehavior.t.sol      hook-mechanics tests
-│   ├── MEVAttackDefense.t.sol  sandwich / JIT / bot-escalation tests
-│   └── ScoringOracle.t.sol     scoring + access-control tests
+│   ├── HookBehavior.t.sol             hook fee-ladder tests
+│   ├── MEVAttackDefense.t.sol         sandwich/JIT/escalation tests
+│   ├── ScoringOracle.t.sol            scoring + decay tests
+│   ├── TaskManager.t.sol              BLS task lifecycle tests
+│   ├── ServiceManager.t.sol           service manager tests
+│   └── DemoSimulation.t.sol           end-to-end demo scenarios
 ├── script/
-│   └── Deploy.s.sol            CREATE2 deploy with hook-address mining
-├── lib/                        git-submodule dependencies (pinned, see below)
-├── foundry.toml                Foundry project config
-├── remappings.txt              import-path aliases
-├── foundry.lock                exact dependency commits
-├── Makefile                    common commands (make help)
-├── .gitignore                  ignores out/, cache/, .env, etc.
-└── README.md                   this file
+│   ├── Deploy.s.sol                   mainnet deploy with BLS infra
+│   └── DeploySepolia.s.sol            Sepolia deploy with mock BLS
+├── operator/                          off-chain operator node (Node.js)
+├── lib/                               git-submodule dependencies
+├── foundry.toml                       auto_detect_solc, Cancun EVM
+├── remappings.txt                     import-path aliases
+└── README.md                          this file
 ```
 
-### File-by-file
+## Multi-solc compilation
 
-#### `src/GradientShieldHook.sol` — the hook
+The project uses `auto_detect_solc = true` in `foundry.toml` because:
+- Uniswap v4-core requires **exactly solc 0.8.26**
+- EigenLayer middleware requires **solc ^0.8.27**
 
-The Uniswap v4 hook itself. Extends `BaseHook` (from v4-periphery) and is the
-contract a pool points at.
+Foundry automatically resolves the correct compiler per file based on pragma
+declarations. Project source files use `pragma ^0.8.26` to compile with either
+version.
 
-- **Config constants** — `SUSPICIOUS_THRESHOLD` (40), `REJECT_THRESHOLD` (80),
-  `ESCALATION_MULTIPLIER` (3), `BASE_FEE` (3000 pips = 0.30%). These define the
-  fee ladder above.
-- **State** — an immutable reference to the `ScoringOracle`, plus
-  `_lastSwapBlock[poolId][swapper]` bookkeeping used by the (TODO) sandwich
-  heuristic.
-- **`getHookPermissions()`** — declares which v4 callbacks are active:
-  `beforeSwap`, `beforeAddLiquidity`, `beforeRemoveLiquidity`. These flags must
-  match the deployed address (see `Deploy.s.sol`).
-- **`_beforeSwap(...)`** — the core logic described in the
-  [beforeSwap sequence](#what-runs-on-every-swap-_beforeswap) above. Sandwich
-  detection is a marked `TODO`.
-- **`_beforeAddLiquidity` / `_beforeRemoveLiquidity`** — pass-throughs today;
-  the entry points for the (TODO) JIT-liquidity heuristic.
-- **Events** — `SwapTelemetry`, `SandwichDetected`, `JITDetected`,
-  `FeeEscalated`, `BotRejectedEvent` (the last is the log; `BotRejected` is the
-  revert error).
-- **Errors** — `BotRejected(swapper, score)`.
+## Dependency versions
 
-#### `src/ScoringOracle.sol` — the score store
+| Dependency | Pinned rev | Why |
+|------------|-----------|-----|
+| `v4-core` | `59d3ecf` | Has `types/PoolOperation.sol` (`SwapParams`, `ModifyLiquidityParams`) |
+| `v4-periphery` | `3779387` | Last commit with `src/utils/BaseHook.sol` (removed in #510) |
+| `eigenlayer-middleware` | v1.5 | BLS infrastructure (`BLSSignatureChecker`, `ServiceManagerBase`, `RegistryCoordinator`) |
+| `forge-std` | `v1.16.2` | -- |
 
-Holds one MEV-risk score (0–100) per address, written by the AVS and read by
-the hook.
-
-- **`ScoreRecord` struct** — `{ uint16 score; uint40 lastUpdated; }` packed into
-  one slot.
-- **Constants** — `MAX_SCORE` (100), `DECAY_PER_DAY` (5), `ONE_DAY`.
-- **Storage** — `_records` mapping, plus `avs` (authorised writer) and `owner`.
-- **Writes (AVS-gated)** — `setScore(subject, score)` sets an absolute value;
-  `bumpScore(subject, delta)` is meant to add to the live score and saturate at
-  `MAX_SCORE` (currently a `TODO` that reverts).
-- **Reads** — `getScore(subject)` should apply linear daily decay (currently
-  returns the raw stored score — decay is a `TODO`); `rawRecord(subject)`
-  returns the undecayed record for indexers.
-- **Admin** — `setAvs`, `transferOwnership`, guarded by `onlyOwner`.
-- **Events / errors** — `ScoreUpdated`, `AvsUpdated`; `NotOwner`, `NotAvs`,
-  `ScoreOutOfRange`, `ZeroAddress`.
-
-#### `test/HookBehavior.t.sol` — hook mechanics
-
-Tests that make `GradientShieldHook` a *valid, correctly-priced* v4 hook,
-independent of any attack scenario: `test_permissionsFlags` (declared vs.
-address flags), `test_baseFeeForCleanSwapper` (score 0 → base fee),
-`test_dynamicFeeOverrideApplied` (the fee override is actually charged). All
-skipped pending pool fixtures.
-
-#### `test/MEVAttackDefense.t.sol` — MEV attacks
-
-Tests the defenses: `test_sandwichPatternIsDetected`,
-`test_jitLiquidityIsDetected`, and the headline `test_sandwichBotSimulation` —
-the full escalation demo (bot sandwiches → scored 60 → pays 3× → scored 95 →
-rejected). All skipped pending detection logic. Each test body sketches the
-intended flow in comments.
-
-#### `test/ScoringOracle.t.sol` — scoring in isolation
-
-Unit tests for the oracle with no hook involved. `test_onlyAvsCanSetScore` and
-`test_setScoreRejectsOutOfRange` **pass today**; `test_scoreDecaysOverTime` and
-`test_bumpScoreSaturatesAtMax` are skipped until decay/bump are implemented.
-
-#### `script/Deploy.s.sol` — deployment
-
-A `forge script` that deploys the oracle, mines a CREATE2 salt with `HookMiner`
-so the hook lands at an address whose low bits encode its permission flags,
-deploys `GradientShieldHook` to that mined address, and asserts the address
-matches. Reads `POOL_MANAGER` and `PRIVATE_KEY` from the environment. Pool
-initialisation and wiring the real AVS ServiceManager are marked `TODO`.
-
-#### Config & tooling
-
-- **`foundry.toml`** — solc 0.8.26, Cancun EVM, optimizer on, `ffi = true` (the
-  hook-address mining needs it), and `fs_permissions` for broadcast files.
-- **`remappings.txt`** — maps `@uniswap/v4-core/`, `@uniswap/v4-periphery/`,
-  `forge-std/`, `solmate/`, and `@openzeppelin/contracts/` onto the `lib/` tree.
-- **`foundry.lock`** — records the exact dependency commits (see below).
-- **`Makefile`** — thin wrappers over the forge commands; run `make help`.
-- **`lib/`** — `forge-std`, `v4-core`, `v4-periphery` as git submodules, pinned
-  to the commits below.
-
-## Dependency versions (important)
-
-This scaffold pins specific commits rather than using bare `forge install`
-tags, because the moving parts have to agree:
-
-| Dependency     | Pinned rev  | Why                                                            |
-| -------------- | ----------- | ------------------------------------------------------------- |
-| `v4-core`      | `59d3ecf`   | Has `types/PoolOperation.sol` (`SwapParams`, `ModifyLiquidityParams`). |
-| `v4-periphery` | `3779387`   | Last commit that still ships `src/utils/BaseHook.sol` (removed in #510). |
-| `forge-std`    | `v1.16.2`   | —                                                             |
-
-`v4-periphery` `main` moved `BaseHook` out to a separate hooks repo, and the
-latest `v4-core` release tag (`v4.0.0`) predates the `PoolOperation.sol` split,
-so the two no longer compile together out of the box. The pins above are a
-matched pair. They are recorded in `foundry.lock`; re-running `forge install`
-without arguments will respect them.
-
-Because the deps are submodules, clone recursively:
+Clone recursively:
 
 ```bash
 git clone --recurse-submodules https://github.com/sivajialla/gradient-shield.git
-# already cloned? then:
-make install    # git submodule update --init --recursive && forge install
 ```
 
-## Deploy to testnet
+## Deploy
+
+### Mainnet / testnet (with real BLS infrastructure)
+
+Requires EigenLayer core + BLS infrastructure (RegistryCoordinator, BLSApkRegistry,
+StakeRegistry) already deployed on the target chain.
 
 ```bash
-export POOL_MANAGER=<pool_manager_address_on_target_chain>
-export PRIVATE_KEY=<your_private_key>
-export RPC_URL=<testnet_rpc_url>
+export PRIVATE_KEY=<key>
+export POOL_MANAGER=<address>
+export REGISTRY_COORDINATOR=<address>
+export STAKE_REGISTRY=<address>
+export AVS_DIRECTORY=<address>
+export REWARDS_COORDINATOR=<address>
+export PERMISSION_CONTROLLER=<address>
+export ALLOCATION_MANAGER=<address>
+export PAUSER_REGISTRY=<address>
+export AGGREGATOR=<aggregator_address>
+export GENERATOR=<generator_address>
 
-make deploy
-# or directly:
-forge script script/Deploy.s.sol --rpc-url $RPC_URL --private-key $PRIVATE_KEY --broadcast
+forge script script/Deploy.s.sol --rpc-url $RPC_URL --broadcast
 ```
 
-## What to build next
+### Sepolia (with mock infrastructure)
 
-1. Implement the `TODO`s in `ScoringOracle` (linear decay, `bumpScore`) and
-   `GradientShieldHook` (sandwich/JIT heuristics, fee override guard).
-2. Wire the v4 test fixtures (`Deployers`, `HookMiner`) and un-skip the tests,
-   starting with `test_sandwichBotSimulation`.
-3. Connect `ScoringOracle` to an EigenLayer ServiceManager for real AVS
-   signature verification (replace the single `onlyAvs` writer).
-4. Build the AVS operator node (TypeScript) that indexes `SwapTelemetry` events
-   and computes scores.
-5. Deploy to Base Sepolia or Unichain Sepolia and record the escalation demo.
+Deploys mock BLS infrastructure for testing without real operator stake:
+
+```bash
+export PRIVATE_KEY=<key>
+forge script script/DeploySepolia.s.sol --rpc-url $RPC_URL --broadcast
+```
+
+---
+
+## Acknowledgements
+
+The LP fee redistribution concept and BLS task manager architecture were inspired
+by [krisoshea-eth](https://github.com/krisoshea-eth)'s
+[MEV-Auction-Hook](https://github.com/krisoshea-eth/MEV-Auction-Hook).
+GradientShield takes a different approach — instant swaps with score-based MEV
+taxation rather than auction-paused execution — but the BLS quorum pattern for
+AVS task verification follows a similar structure. Credit and thanks to the
+original author.

@@ -1,29 +1,32 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.27;
+pragma solidity ^0.8.26;
 
 import {Script, console2} from "forge-std/Script.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
-import {ECDSAStakeRegistry} from "eigenlayer-middleware/src/unaudited/ECDSAStakeRegistry.sol";
-import {IDelegationManager} from "eigenlayer-contracts/src/contracts/interfaces/IDelegationManager.sol";
-import {IECDSAStakeRegistryTypes} from "eigenlayer-middleware/src/interfaces/IECDSAStakeRegistry.sol";
-import {ISignatureUtilsMixinTypes} from
-    "eigenlayer-contracts/src/contracts/interfaces/ISignatureUtilsMixin.sol";
-import {IStrategy} from "eigenlayer-contracts/src/contracts/interfaces/IStrategy.sol";
+import {ISlashingRegistryCoordinator} from "eigenlayer-middleware/src/interfaces/ISlashingRegistryCoordinator.sol";
+import {IStakeRegistry} from "eigenlayer-middleware/src/interfaces/IStakeRegistry.sol";
+import {IAVSDirectory} from "eigenlayer-contracts/src/contracts/interfaces/IAVSDirectory.sol";
+import {IRewardsCoordinator} from "eigenlayer-contracts/src/contracts/interfaces/IRewardsCoordinator.sol";
+import {IPermissionController} from "eigenlayer-contracts/src/contracts/interfaces/IPermissionController.sol";
+import {IAllocationManager} from "eigenlayer-contracts/src/contracts/interfaces/IAllocationManager.sol";
+import {IPauserRegistry} from "eigenlayer-contracts/src/contracts/interfaces/IPauserRegistry.sol";
 
-import {DelegationMock} from "eigenlayer-middleware/test/mocks/DelegationMock.sol";
 import {AVSDirectoryMock} from "eigenlayer-middleware/test/mocks/AVSDirectoryMock.sol";
 import {AllocationManagerMock} from "eigenlayer-middleware/test/mocks/AllocationManagerMock.sol";
 import {RewardsCoordinatorMock} from "eigenlayer-middleware/test/mocks/RewardsCoordinatorMock.sol";
-import {ERC20Mock} from "eigenlayer-middleware/test/mocks/ERC20Mock.sol";
+import {PermissionControllerMock} from "eigenlayer-middleware/test/mocks/PermissionControllerMock.sol";
 
 import {GradientShieldServiceManager} from "../src/GradientShieldServiceManager.sol";
+import {GradientShieldTaskManager} from "../src/GradientShieldTaskManager.sol";
+import {IGradientShieldTaskManager} from "../src/IGradientShieldTaskManager.sol";
 import {ScoringOracle} from "../src/ScoringOracle.sol";
 
 /// @title DeploySepolia
-/// @notice Deploys GradientShield AVS on Sepolia with mocked EigenLayer infra.
-///         No real staking needed — mock contracts simulate the EigenLayer layer.
-///         The deployer's address is auto-registered as an operator.
+/// @notice Deploys GradientShield BLS AVS on Sepolia with mocked EigenLayer infra.
+///         Mock RegistryCoordinator, StakeRegistry, BLSApkRegistry are created as
+///         simple contracts that return the minimum required values for constructor
+///         initialization.
 ///
 /// Usage:
 ///   forge script script/DeploySepolia.s.sol --rpc-url $RPC_URL --broadcast
@@ -33,93 +36,127 @@ contract DeploySepolia is Script {
         address deployer = vm.addr(pk);
 
         console2.log("Deployer:", deployer);
-
         vm.startBroadcast(pk);
 
-        // Step 1: EigenLayer mocks + StakeRegistry
-        (ECDSAStakeRegistry stakeRegistry, DelegationMock delegation, address[4] memory mockAddrs) =
-            _deployMocks();
+        // Step 1: Deploy mock BLS infrastructure
+        address[5] memory mocks = _deployMocks();
 
-        // Step 2: Oracle + ServiceManager
-        (ScoringOracle oracle, GradientShieldServiceManager sm) =
-            _deployAVS(deployer, stakeRegistry, mockAddrs);
-
-        // Step 3: Wire + register operator
-        _wireAndRegister(deployer, oracle, sm, stakeRegistry, delegation, IStrategy(mockAddrs[3]));
+        // Step 2: Deploy Oracle + TaskManager + ServiceManager
+        _deployAVS(deployer, mocks);
 
         vm.stopBroadcast();
     }
 
-    function _deployMocks()
-        internal
-        returns (ECDSAStakeRegistry stakeRegistry, DelegationMock delegation, address[4] memory addrs)
-    {
-        delegation = new DelegationMock();
-        AVSDirectoryMock avsDir = new AVSDirectoryMock();
-        AllocationManagerMock allocMgr = new AllocationManagerMock();
-        RewardsCoordinatorMock rewards = new RewardsCoordinatorMock();
-        ERC20Mock mockToken = new ERC20Mock();
+    function _deployMocks() internal returns (address[5] memory mocks) {
+        MockDelegation mockDel = new MockDelegation();
+        MockStakeRegistry mockSR = new MockStakeRegistry(address(mockDel));
+        MockBLSApkRegistry mockAPK = new MockBLSApkRegistry();
+        MockRegistryCoordinator mockRC = new MockRegistryCoordinator(address(mockSR), address(mockAPK));
+        MockPauserRegistry mockPR = new MockPauserRegistry();
 
-        stakeRegistry = new ECDSAStakeRegistry(IDelegationManager(address(delegation)));
+        mocks[0] = address(mockRC);
+        mocks[1] = address(mockSR);
+        mocks[2] = address(mockPR);
+        mocks[3] = address(new AVSDirectoryMock());
+        mocks[4] = address(new AllocationManagerMock());
 
-        addrs = [address(avsDir), address(rewards), address(allocMgr), address(mockToken)];
-
-        console2.log("DelegationMock:", address(delegation));
-        console2.log("ECDSAStakeRegistry:", address(stakeRegistry));
+        console2.log("Mock infra deployed");
     }
 
-    function _deployAVS(
-        address deployer,
-        ECDSAStakeRegistry stakeRegistry,
-        address[4] memory mockAddrs
-    ) internal returns (ScoringOracle oracle, GradientShieldServiceManager sm) {
-        oracle = new ScoringOracle(address(0));
+    function _deployAVS(address deployer, address[5] memory m) internal {
+        ScoringOracle oracle = new ScoringOracle(address(0));
         console2.log("ScoringOracle:", address(oracle));
 
-        GradientShieldServiceManager impl = new GradientShieldServiceManager(
-            mockAddrs[0], // avsDirectory
-            address(stakeRegistry),
-            mockAddrs[1], // rewardsCoordinator
-            address(0), // delegationManager (accessed via stakeRegistry)
-            mockAddrs[2], // allocationManager
+        RewardsCoordinatorMock rewardsCoord = new RewardsCoordinatorMock();
+        PermissionControllerMock permCtrl = new PermissionControllerMock();
+
+        // TaskManager (BLS-verified scoring)
+        GradientShieldTaskManager tmImpl = new GradientShieldTaskManager(
+            ISlashingRegistryCoordinator(m[0]), IPauserRegistry(m[2]), 100
+        );
+        ERC1967Proxy tmProxy = new ERC1967Proxy(
+            address(tmImpl),
+            abi.encodeCall(GradientShieldTaskManager.initialize, (deployer, deployer, deployer, oracle))
+        );
+        console2.log("TaskManager (proxy):", address(tmProxy));
+
+        // ServiceManager (AVS identity)
+        GradientShieldServiceManager smImpl = new GradientShieldServiceManager(
+            IAVSDirectory(m[3]),
+            IRewardsCoordinator(address(rewardsCoord)),
+            ISlashingRegistryCoordinator(m[0]),
+            IStakeRegistry(m[1]),
+            IPermissionController(address(permCtrl)),
+            IAllocationManager(m[4]),
             oracle
         );
-        ERC1967Proxy proxy = new ERC1967Proxy(
-            address(impl),
-            abi.encodeCall(GradientShieldServiceManager.initialize, (deployer, deployer))
+        ERC1967Proxy smProxy = new ERC1967Proxy(
+            address(smImpl),
+            abi.encodeCall(
+                GradientShieldServiceManager.initialize,
+                (deployer, deployer, IGradientShieldTaskManager(address(tmProxy)))
+            )
         );
-        sm = GradientShieldServiceManager(address(proxy));
-        console2.log("ServiceManager:", address(sm));
-    }
+        console2.log("ServiceManager (proxy):", address(smProxy));
 
-    function _wireAndRegister(
-        address deployer,
-        ScoringOracle oracle,
-        GradientShieldServiceManager sm,
-        ECDSAStakeRegistry stakeRegistry,
-        DelegationMock delegation,
-        IStrategy mockStrategy
-    ) internal {
-        // Initialize quorum
-        IECDSAStakeRegistryTypes.StrategyParams[] memory sp =
-            new IECDSAStakeRegistryTypes.StrategyParams[](1);
-        sp[0] = IECDSAStakeRegistryTypes.StrategyParams({strategy: mockStrategy, multiplier: 10_000});
-        stakeRegistry.initialize(
-            address(sm), 0, IECDSAStakeRegistryTypes.Quorum({strategies: sp})
-        );
-
-        oracle.setAvs(address(sm));
-
-        // Give deployer mock stake and register as operator
-        delegation.setIsOperator(deployer, true);
-        delegation.setOperatorShares(deployer, mockStrategy, 1000 ether);
-
-        ISignatureUtilsMixinTypes.SignatureWithSaltAndExpiry memory emptySig;
-        emptySig.expiry = type(uint256).max;
-        stakeRegistry.registerOperatorWithSignature(emptySig, deployer);
+        oracle.setAvs(address(tmProxy));
 
         console2.log("---");
-        console2.log("Operator registered:", deployer);
-        console2.log("DEPLOYMENT COMPLETE - save addresses in operator/.env");
+        console2.log("DEPLOYMENT COMPLETE");
+        console2.log("Generator / Aggregator:", deployer);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Minimal mocks for BLS constructor initialization on Sepolia
+// ---------------------------------------------------------------------------
+
+contract MockDelegation {
+    // BLSSignatureCheckerStorage calls stakeRegistry.delegation()
+}
+
+contract MockStakeRegistry {
+    address public immutable delegationAddr;
+
+    constructor(address _delegation) {
+        delegationAddr = _delegation;
+    }
+
+    function delegation() external view returns (address) {
+        return delegationAddr;
+    }
+}
+
+contract MockBLSApkRegistry {}
+
+contract MockRegistryCoordinator {
+    address public immutable stakeRegistryAddr;
+    address public immutable blsApkRegistryAddr;
+
+    constructor(address _sr, address _apk) {
+        stakeRegistryAddr = _sr;
+        blsApkRegistryAddr = _apk;
+    }
+
+    function stakeRegistry() external view returns (address) {
+        return stakeRegistryAddr;
+    }
+
+    function blsApkRegistry() external view returns (address) {
+        return blsApkRegistryAddr;
+    }
+
+    function quorumCount() external pure returns (uint8) {
+        return 0;
+    }
+}
+
+contract MockPauserRegistry {
+    function isPauser(address) external pure returns (bool) {
+        return true;
+    }
+
+    function unpauser() external pure returns (address) {
+        return address(1);
     }
 }

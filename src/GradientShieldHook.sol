@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.27;
+pragma solidity ^0.8.26;
 
 import {BaseHook} from "@uniswap/v4-periphery/src/utils/BaseHook.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
@@ -15,15 +15,19 @@ import {ScoringOracle} from "./ScoringOracle.sol";
 
 /// @title GradientShieldHook
 /// @notice Uniswap v4 hook that prices swaps by the swapper's MEV risk score and
-///         emits telemetry for an off-chain AVS (EigenLayer operator set) to consume.
-/// @dev SCAFFOLD STUB — hook wiring, permissions, events, errors and the fee/detection
-///      surface are laid out; the actual fee math and JIT/sandwich heuristics are
-///      marked with TODOs.
+///         detects sandwich attacks and JIT liquidity patterns on-chain.
 ///
 /// Fee ladder (driven by {ScoringOracle} score):
-///   score < SUSPICIOUS_THRESHOLD   → base dynamic fee
-///   score < REJECT_THRESHOLD       → base fee × ESCALATION_MULTIPLIER (FeeEscalated)
-///   score >= REJECT_THRESHOLD      → revert BotRejected
+///   score < SUSPICIOUS_THRESHOLD   -> base dynamic fee
+///   score < REJECT_THRESHOLD       -> base fee x ESCALATION_MULTIPLIER (FeeEscalated)
+///   score >= REJECT_THRESHOLD      -> revert BotRejected
+///
+/// Sandwich detection: flags an address that swaps in both directions within
+/// the same block on the same pool, with at least one intervening swap by a
+/// different address (the victim).
+///
+/// JIT detection: flags an address that adds and removes liquidity in the
+/// same block on the same pool.
 contract GradientShieldHook is BaseHook {
     using PoolIdLibrary for PoolKey;
     using LPFeeLibrary for uint24;
@@ -32,17 +36,9 @@ contract GradientShieldHook is BaseHook {
     // Config
     // ---------------------------------------------------------------------
 
-    /// @notice Score at/above which swaps pay the escalated fee.
     uint16 public constant SUSPICIOUS_THRESHOLD = 40;
-
-    /// @notice Score at/above which swaps are rejected outright.
     uint16 public constant REJECT_THRESHOLD = 80;
-
-    /// @notice Multiplier applied to the base fee for suspicious swappers (3x).
     uint24 public constant ESCALATION_MULTIPLIER = 3;
-
-    /// @notice Base LP fee in pips (1e6 = 100%). 3000 = 0.30%.
-    /// @dev TODO: make per-pool configurable instead of a single constant.
     uint24 public constant BASE_FEE = 3000;
 
     // ---------------------------------------------------------------------
@@ -51,16 +47,34 @@ contract GradientShieldHook is BaseHook {
 
     ScoringOracle public immutable oracle;
 
-    /// @notice Last swap block per (pool, swapper) — used by JIT/sandwich heuristics.
-    /// @dev TODO: expand into whatever window state the detectors need
-    ///      (e.g. last swap direction, last block, pending victim marker).
-    mapping(PoolId => mapping(address => uint256)) internal _lastSwapBlock;
+    /// @notice Tracks the first swap direction per (pool, swapper) in a given block.
+    struct SwapRecord {
+        uint256 blockNumber;
+        bool zeroForOne;
+    }
+
+    mapping(PoolId => mapping(address => SwapRecord)) internal _firstSwap;
+
+    /// @notice Per-pool swap counter within a block, used to confirm an
+    ///         intervening victim swap between the front-run and back-run.
+    struct BlockSwapCounter {
+        uint256 blockNumber;
+        uint256 count;
+    }
+
+    mapping(PoolId => BlockSwapCounter) internal _blockSwaps;
+
+    /// @notice Tracks add-liquidity per (pool, provider) in a given block for JIT detection.
+    struct LiquidityRecord {
+        uint256 blockNumber;
+    }
+
+    mapping(PoolId => mapping(address => LiquidityRecord)) internal _liquidityAdds;
 
     // ---------------------------------------------------------------------
-    // Events (indexed by the AVS operator node)
+    // Events
     // ---------------------------------------------------------------------
 
-    /// @notice Emitted on every swap; the AVS indexes these to compute scores.
     event SwapTelemetry(
         PoolId indexed poolId,
         address indexed swapper,
@@ -71,23 +85,15 @@ contract GradientShieldHook is BaseHook {
         uint256 blockNumber
     );
 
-    /// @notice Emitted when the in-hook sandwich heuristic flags a swap.
     event SandwichDetected(PoolId indexed poolId, address indexed swapper, uint256 blockNumber);
-
-    /// @notice Emitted when the JIT-liquidity heuristic flags an add/remove pattern.
     event JITDetected(PoolId indexed poolId, address indexed provider, uint256 blockNumber);
-
-    /// @notice Emitted when a suspicious swapper is charged the escalated fee.
     event FeeEscalated(PoolId indexed poolId, address indexed swapper, uint24 baseFee, uint24 chargedFee);
-
-    /// @notice Emitted when a swap is rejected for exceeding {REJECT_THRESHOLD}.
     event BotRejectedEvent(PoolId indexed poolId, address indexed swapper, uint16 score);
 
     // ---------------------------------------------------------------------
     // Errors
     // ---------------------------------------------------------------------
 
-    /// @notice Thrown in {_beforeSwap} when the swapper's score >= REJECT_THRESHOLD.
     error BotRejected(address swapper, uint16 score);
 
     // ---------------------------------------------------------------------
@@ -102,16 +108,15 @@ contract GradientShieldHook is BaseHook {
     // Hook permissions
     // ---------------------------------------------------------------------
 
-    /// @inheritdoc BaseHook
     function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
         return Hooks.Permissions({
             beforeInitialize: false,
             afterInitialize: false,
-            beforeAddLiquidity: true, // JIT detection entry point (TODO)
+            beforeAddLiquidity: true,
             afterAddLiquidity: false,
-            beforeRemoveLiquidity: true, // JIT detection exit point (TODO)
+            beforeRemoveLiquidity: true,
             afterRemoveLiquidity: false,
-            beforeSwap: true, // fee logic + telemetry + sandwich detection
+            beforeSwap: true,
             afterSwap: false,
             beforeDonate: false,
             afterDonate: false,
@@ -123,16 +128,10 @@ contract GradientShieldHook is BaseHook {
     }
 
     // ---------------------------------------------------------------------
-    // beforeSwap — the core of GradientShieldHook
+    // beforeSwap
     // ---------------------------------------------------------------------
 
-    /// @dev Flow (TODO items are the real logic to fill in):
-    ///   1. Read decayed score from the oracle for `sender`.
-    ///   2. If score >= REJECT_THRESHOLD → emit BotRejectedEvent, revert BotRejected.
-    ///   3. Run sandwich heuristic against {_lastSwapBlock} → maybe emit SandwichDetected.
-    ///   4. Compute fee: escalate if score >= SUSPICIOUS_THRESHOLD (emit FeeEscalated).
-    ///   5. Emit SwapTelemetry, record this block, and return the fee override.
-    function _beforeSwap(address sender, PoolKey calldata key, SwapParams calldata params, bytes calldata /*hookData*/ )
+    function _beforeSwap(address sender, PoolKey calldata key, SwapParams calldata params, bytes calldata)
         internal
         override
         returns (bytes4, BeforeSwapDelta, uint24)
@@ -140,60 +139,76 @@ contract GradientShieldHook is BaseHook {
         PoolId poolId = key.toId();
         uint16 score = oracle.getScore(sender);
 
-        // 2. Hard reject.
+        // Hard reject.
         if (score >= REJECT_THRESHOLD) {
             emit BotRejectedEvent(poolId, sender, score);
             revert BotRejected(sender, score);
         }
 
-        // 3. Sandwich heuristic.
-        // TODO: compare params.zeroForOne / block cadence against _lastSwapBlock and
-        //       emit SandwichDetected when the back-run pattern is observed.
+        // Sandwich heuristic: same address, same pool, same block, opposite direction,
+        // with at least one intervening swap (the victim).
+        SwapRecord storage first = _firstSwap[poolId][sender];
+        BlockSwapCounter storage counter = _blockSwaps[poolId];
 
-        // 4. Fee computation.
+        // Reset per-block swap counter if we're in a new block.
+        if (counter.blockNumber != block.number) {
+            counter.blockNumber = block.number;
+            counter.count = 0;
+        }
+
+        if (first.blockNumber == block.number) {
+            // Same address already swapped this block — check for back-run.
+            if (first.zeroForOne != params.zeroForOne && counter.count >= 2) {
+                // Opposite direction + at least one intervening swap = sandwich back-run.
+                emit SandwichDetected(poolId, sender, block.number);
+            }
+        } else {
+            // First swap by this address in this block — record direction.
+            first.blockNumber = block.number;
+            first.zeroForOne = params.zeroForOne;
+        }
+
+        counter.count++;
+
+        // Fee computation.
         uint24 fee = BASE_FEE;
         if (score >= SUSPICIOUS_THRESHOLD) {
             fee = BASE_FEE * ESCALATION_MULTIPLIER;
             emit FeeEscalated(poolId, sender, BASE_FEE, fee);
         }
 
-        // 5. Telemetry + bookkeeping.
-        emit SwapTelemetry(
-            poolId, sender, params.zeroForOne, params.amountSpecified, score, fee, block.number
-        );
-        _lastSwapBlock[poolId][sender] = block.number;
+        // Telemetry.
+        emit SwapTelemetry(poolId, sender, params.zeroForOne, params.amountSpecified, score, fee, block.number);
 
-        // Return the fee as a dynamic-fee override (2nd-highest bit set per v4 spec).
-        // TODO: only valid if the pool was initialised with a dynamic fee. Guard or
-        //       document that requirement in Deploy.s.sol / pool setup.
         uint24 overrideFee = fee | LPFeeLibrary.OVERRIDE_FEE_FLAG;
         return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, overrideFee);
     }
 
     // ---------------------------------------------------------------------
-    // JIT-liquidity detection hooks
+    // JIT-liquidity detection
     // ---------------------------------------------------------------------
 
-    /// @dev TODO: record the add-liquidity block; if a remove-liquidity for the same
-    ///      provider lands in the same block/swap window, emit JITDetected and
-    ///      optionally feed it into the oracle scoring pipeline.
     function _beforeAddLiquidity(
-        address, /*sender*/
-        PoolKey calldata, /*key*/
-        ModifyLiquidityParams calldata, /*params*/
-        bytes calldata /*hookData*/
+        address sender,
+        PoolKey calldata key,
+        ModifyLiquidityParams calldata,
+        bytes calldata
     ) internal override returns (bytes4) {
-        // Passthrough for now.
+        PoolId poolId = key.toId();
+        _liquidityAdds[poolId][sender].blockNumber = block.number;
         return BaseHook.beforeAddLiquidity.selector;
     }
 
     function _beforeRemoveLiquidity(
-        address, /*sender*/
-        PoolKey calldata, /*key*/
-        ModifyLiquidityParams calldata, /*params*/
-        bytes calldata /*hookData*/
+        address sender,
+        PoolKey calldata key,
+        ModifyLiquidityParams calldata,
+        bytes calldata
     ) internal override returns (bytes4) {
-        // Passthrough for now.
+        PoolId poolId = key.toId();
+        if (_liquidityAdds[poolId][sender].blockNumber == block.number) {
+            emit JITDetected(poolId, sender, block.number);
+        }
         return BaseHook.beforeRemoveLiquidity.selector;
     }
 }

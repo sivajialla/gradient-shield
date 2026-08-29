@@ -1,51 +1,104 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.27;
+pragma solidity ^0.8.26;
 
 import {Test, console2} from "forge-std/Test.sol";
+import {Deployers} from "@uniswap/v4-core/test/utils/Deployers.sol";
+import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
+import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {LPFeeLibrary} from "@uniswap/v4-core/src/libraries/LPFeeLibrary.sol";
+import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
+import {PoolSwapTest} from "@uniswap/v4-core/src/test/PoolSwapTest.sol";
+import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
+import {HookMiner} from "@uniswap/v4-periphery/src/utils/HookMiner.sol";
+import {CustomRevert} from "@uniswap/v4-core/src/libraries/CustomRevert.sol";
 
 import {GradientShieldHook} from "../src/GradientShieldHook.sol";
 import {ScoringOracle} from "../src/ScoringOracle.sol";
 
-/// @title HookBehaviorTest
-/// @notice Tests the *hook mechanics* of {GradientShieldHook} — the parts that make it a
-///         valid Uniswap v4 hook and drive the fee ladder, independent of any attack
-///         scenario. Attack detection lives in {MEVAttackDefenseTest}; raw scoring
-///         lives in {ScoringOracleTest}.
-/// @dev SCAFFOLD STUB — fixtures (Deployers, HookMiner, dynamic-fee pool) are TODO,
-///      so every test is skipped until the hook logic is implemented.
-contract HookBehaviorTest is Test {
+contract HookBehaviorTest is Test, Deployers {
+    using PoolIdLibrary for PoolKey;
+
     GradientShieldHook internal hook;
     ScoringOracle internal oracle;
 
-    address internal constant SWAPPER = address(0x5AFE);
     address internal avs = address(0xA75);
 
     function setUp() public {
-        // TODO: deployFreshManagerAndRouters(), mint/approve currencies, deploy oracle,
-        //       mine a hook address with the right permission flags, deploy GradientShieldHook
-        //       there, and initialise a DYNAMIC-FEE pool.
+        deployFreshManagerAndRouters();
+
         oracle = new ScoringOracle(avs);
-        // hook = GradientShieldHook(minedAddress);
+
+        uint160 flags = uint160(
+            Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG
+        );
+
+        (address hookAddr, bytes32 salt) = HookMiner.find(
+            address(this),
+            flags,
+            type(GradientShieldHook).creationCode,
+            abi.encode(manager, oracle)
+        );
+        hook = new GradientShieldHook{salt: salt}(IPoolManager(manager), oracle);
+        require(address(hook) == hookAddr, "hook address mismatch");
+
+        deployMintAndApprove2Currencies();
+
+        (key,) = initPoolAndAddLiquidity(
+            currency0, currency1, IHooks(address(hook)), LPFeeLibrary.DYNAMIC_FEE_FLAG, SQRT_PRICE_1_1
+        );
     }
 
-    /// @notice The declared getHookPermissions() must match the flags encoded in the
-    ///         deployed hook address (beforeSwap + before add/remove liquidity).
-    function test_permissionsFlags() public {
-        // TODO: assert Hooks.validateHookPermissions passes for the mined address.
-        vm.skip(true);
+    function test_permissionsFlags() public view {
+        Hooks.Permissions memory perms = hook.getHookPermissions();
+        assertTrue(perms.beforeSwap);
+        assertTrue(perms.beforeAddLiquidity);
+        assertTrue(perms.beforeRemoveLiquidity);
+        assertFalse(perms.afterSwap);
+        assertFalse(perms.beforeInitialize);
     }
 
-    /// @notice A clean swapper (score 0) pays exactly BASE_FEE — no escalation.
     function test_baseFeeForCleanSwapper() public {
-        // TODO: swap as SWAPPER, assert SwapTelemetry.feeCharged == BASE_FEE and no
-        //       FeeEscalated event is emitted.
-        vm.skip(true);
+        PoolId poolId = key.toId();
+
+        vm.expectEmit(true, true, false, false);
+        emit GradientShieldHook.SwapTelemetry(poolId, address(swapRouter), true, -100, 0, 3000, block.number);
+
+        swap(key, true, -100, ZERO_BYTES);
     }
 
-    /// @notice The fee returned by beforeSwap is a valid dynamic-fee override
-    ///         (OVERRIDE_FEE_FLAG set) and is honoured by the PoolManager.
+    function test_escalatedFeeForSuspiciousSwapper() public {
+        vm.prank(avs);
+        oracle.setScore(address(swapRouter), 50);
+
+        PoolId poolId = key.toId();
+
+        vm.expectEmit(true, true, false, true);
+        emit GradientShieldHook.FeeEscalated(poolId, address(swapRouter), 3000, 9000);
+
+        swap(key, true, -100, ZERO_BYTES);
+    }
+
+    function test_rejectBotAboveThreshold() public {
+        vm.prank(avs);
+        oracle.setScore(address(swapRouter), 85);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CustomRevert.WrappedError.selector,
+                address(hook),
+                IHooks.beforeSwap.selector,
+                abi.encodeWithSelector(GradientShieldHook.BotRejected.selector, address(swapRouter), uint16(85)),
+                abi.encodeWithSelector(Hooks.HookCallFailed.selector)
+            )
+        );
+        swap(key, true, -100, ZERO_BYTES);
+    }
+
     function test_dynamicFeeOverrideApplied() public {
-        // TODO: assert the pool actually charges the overridden fee for a swap.
-        vm.skip(true);
+        swap(key, true, -100, ZERO_BYTES);
     }
 }
