@@ -94,9 +94,12 @@ contract ScoringOracle {
     /// @notice Set the absolute score for an address.
     /// @dev TODO: accept operator signatures / task response instead of a bare
     ///      onlyAvs write once wired to EigenLayer.
+    /// This is the function that tells that address has certain score by AVS.
     function setScore(address subject, uint16 newScore) external onlyAvs {
         if (newScore > MAX_SCORE) revert ScoreOutOfRange(newScore);
+        // saves the old score for the event
         uint16 old = _records[subject].score;
+        // block.timestamp will reset the decay clock
         _records[subject] = ScoreRecord({score: newScore, lastUpdated: uint40(block.timestamp)});
         emit ScoreUpdated(subject, old, newScore, msg.sender);
     }
@@ -104,8 +107,11 @@ contract ScoringOracle {
     /// @notice Increase a score by a delta, saturating at {MAX_SCORE}.
     /// @dev Applies decay to the current value first so escalation compounds off
     ///      the live score, not the stale stored value.
+    /// delta is if the bot got any other escalations that made the score increase.
     function bumpScore(address subject, uint16 delta) external onlyAvs returns (uint16 newScore) {
+        // reads the exact current decay score
         uint16 current = _decayedScore(_records[subject]);
+        // fetches the old score from array
         uint16 old = _records[subject].score;
         newScore = current + delta;
         if (newScore > MAX_SCORE) newScore = MAX_SCORE;
@@ -123,6 +129,7 @@ contract ScoringOracle {
     }
 
     /// @notice Raw record without decay, for off-chain indexers / debugging.
+    /// This is for noticing and writing off when it was happened.
     function rawRecord(address subject) external view returns (ScoreRecord memory) {
         return _records[subject];
     }

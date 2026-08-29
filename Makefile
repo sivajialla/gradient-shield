@@ -6,7 +6,7 @@
 export
 
 .DEFAULT_GOAL := help
-.PHONY: help install build test test-verbose sim fmt fmt-check clean deploy snapshot
+.PHONY: help install build test test-verbose sim demo fmt fmt-check clean deploy snapshot
 
 ## help: list available targets
 help:
@@ -33,6 +33,10 @@ test-verbose:
 ## sim: run only the sandwich-bot escalation demo
 sim:
 	forge test --match-test test_sandwichBotSimulation -vvvv
+
+## demo: run the full 5-scenario demo (clean, occasional, bot, reformed, side-by-side)
+demo:
+	forge test --match-path test/DemoSimulation.t.sol -vvv
 
 ## fmt: format Solidity sources in place
 fmt:
