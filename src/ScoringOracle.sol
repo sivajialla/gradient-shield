@@ -102,14 +102,15 @@ contract ScoringOracle {
     }
 
     /// @notice Increase a score by a delta, saturating at {MAX_SCORE}.
-    /// @dev Convenience for the escalation flow (e.g. 60 → 95). Applies decay
-    ///      to the current value first so escalation compounds off the live score.
+    /// @dev Applies decay to the current value first so escalation compounds off
+    ///      the live score, not the stale stored value.
     function bumpScore(address subject, uint16 delta) external onlyAvs returns (uint16 newScore) {
-        // TODO: implement — read decayed current score, add delta, clamp to MAX_SCORE,
-        //       persist with fresh timestamp, emit ScoreUpdated.
-        subject; // silence unused-var warnings until implemented
-        delta;
-        revert("ScoringOracle: bumpScore not implemented");
+        uint16 current = _decayedScore(_records[subject]);
+        uint16 old = _records[subject].score;
+        newScore = current + delta;
+        if (newScore > MAX_SCORE) newScore = MAX_SCORE;
+        _records[subject] = ScoreRecord({score: newScore, lastUpdated: uint40(block.timestamp)});
+        emit ScoreUpdated(subject, old, newScore, msg.sender);
     }
 
     // ---------------------------------------------------------------------
@@ -117,17 +118,22 @@ contract ScoringOracle {
     // ---------------------------------------------------------------------
 
     /// @notice Current, decay-adjusted score for an address.
-    /// @dev TODO: implement linear decay:
-    ///        daysElapsed = (block.timestamp - lastUpdated) / ONE_DAY
-    ///        decayed     = score - min(score, daysElapsed * DECAY_PER_DAY)
     function getScore(address subject) external view returns (uint16) {
-        // Placeholder: returns the raw stored score with no decay applied yet.
-        return _records[subject].score;
+        return _decayedScore(_records[subject]);
     }
 
     /// @notice Raw record without decay, for off-chain indexers / debugging.
     function rawRecord(address subject) external view returns (ScoreRecord memory) {
         return _records[subject];
+    }
+
+    /// @notice Linear daily decay: sheds DECAY_PER_DAY per full elapsed day, floored at 0.
+    function _decayedScore(ScoreRecord memory rec) internal view returns (uint16) {
+        if (rec.score == 0 || rec.lastUpdated == 0) return 0;
+        uint256 elapsed = block.timestamp - uint256(rec.lastUpdated);
+        uint256 decay = (elapsed / ONE_DAY) * uint256(DECAY_PER_DAY);
+        if (decay >= rec.score) return 0;
+        return rec.score - uint16(decay);
     }
 
     // ---------------------------------------------------------------------
