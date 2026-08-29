@@ -1,38 +1,33 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.26;
+pragma solidity ^0.8.27;
+
+import {ECDSAServiceManagerBase} from
+    "eigenlayer-middleware/src/unaudited/ECDSAServiceManagerBase.sol";
+import {ECDSAStakeRegistry} from "eigenlayer-middleware/src/unaudited/ECDSAStakeRegistry.sol";
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
 import {ScoringOracle} from "./ScoringOracle.sol";
-import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
-import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 
 /// @title GradientShieldServiceManager
-/// @notice Simplified EigenLayer AVS service manager for GradientShield.
-///         Manages operator registration, score task creation, and verified
-///         score submission to the ScoringOracle.
-/// @dev This follows the EigenLayer ServiceManager pattern (task creation →
-///      operator response → signature verification → state update) but uses
-///      plain ECDSA instead of BLS aggregation for demo simplicity.
-///      In production, this would inherit from EigenLayer's ServiceManagerBase
-///      and use BLSSignatureChecker for multi-operator quorum verification.
-contract GradientShieldServiceManager {
+/// @notice EigenLayer ECDSA-based AVS service manager for GradientShield.
+///         Inherits from ECDSAServiceManagerBase (real EigenLayer middleware)
+///         and adds MEV score task creation / operator response logic.
+/// @dev Operators register through the ECDSAStakeRegistry, which verifies
+///      stake via EigenLayer's DelegationManager. Task responses are verified
+///      against the operator's registered signing key in the stake registry.
+contract GradientShieldServiceManager is ECDSAServiceManagerBase {
     using ECDSA for bytes32;
-    using MessageHashUtils for bytes32;
 
     // -----------------------------------------------------------------
     // Types
     // -----------------------------------------------------------------
 
     struct ScoreTask {
-        address subject; // address being scored
-        uint32 fromBlock; // start of the observation window
-        uint32 toBlock; // end of the observation window
-        uint32 createdBlock; // block when the task was created
-        bool responded; // whether a valid response has been submitted
-    }
-
-    struct Operator {
-        bool registered;
-        address signingKey; // the key the operator signs responses with
+        address subject;
+        uint32 fromBlock;
+        uint32 toBlock;
+        uint32 createdBlock;
+        bool responded;
     }
 
     // -----------------------------------------------------------------
@@ -40,19 +35,12 @@ contract GradientShieldServiceManager {
     // -----------------------------------------------------------------
 
     ScoringOracle public immutable oracle;
-    address public owner;
-
-    mapping(address => Operator) public operators;
-    uint32 public operatorCount;
-
     ScoreTask[] public tasks;
 
     // -----------------------------------------------------------------
     // Events
     // -----------------------------------------------------------------
 
-    event OperatorRegistered(address indexed operator, address signingKey);
-    event OperatorDeregistered(address indexed operator);
     event ScoreTaskCreated(uint32 indexed taskId, address indexed subject, uint32 fromBlock, uint32 toBlock);
     event ScoreTaskResponded(uint32 indexed taskId, address indexed subject, uint16 score, address indexed operator);
 
@@ -60,71 +48,59 @@ contract GradientShieldServiceManager {
     // Errors
     // -----------------------------------------------------------------
 
-    error NotOwner();
-    error AlreadyRegistered();
-    error NotRegistered();
     error TaskAlreadyResponded();
     error InvalidTaskId();
     error InvalidSignature();
     error InvalidBlockRange();
     error ZeroAddress();
-
-    // -----------------------------------------------------------------
-    // Modifiers
-    // -----------------------------------------------------------------
-
-    modifier onlyOwner() {
-        if (msg.sender != owner) revert NotOwner();
-        _;
-    }
+    error OperatorNotRegistered();
 
     // -----------------------------------------------------------------
     // Constructor
     // -----------------------------------------------------------------
 
-    constructor(ScoringOracle _oracle) {
+    constructor(
+        address _avsDirectory,
+        address _stakeRegistry,
+        address _rewardsCoordinator,
+        address _delegationManager,
+        address _allocationManager,
+        ScoringOracle _oracle
+    )
+        ECDSAServiceManagerBase(
+            _avsDirectory,
+            _stakeRegistry,
+            _rewardsCoordinator,
+            _delegationManager,
+            _allocationManager
+        )
+    {
         oracle = _oracle;
-        owner = msg.sender;
+    }
+
+    function initialize(address initialOwner, address rewardsInitiator) external initializer {
+        __ServiceManagerBase_init(initialOwner, rewardsInitiator);
     }
 
     // -----------------------------------------------------------------
-    // Operator management
+    // IServiceManager admin stubs (PermissionController + OperatorSets)
     // -----------------------------------------------------------------
 
-    /// @notice Register as an operator for this AVS.
-    /// @param signingKey The ECDSA key the operator will sign responses with.
-    ///        Can be the same as msg.sender or a separate hot key.
-    /// @dev In production, this would go through EigenLayer's RegistryCoordinator
-    ///      which checks the operator is registered with the DelegationManager
-    ///      and has sufficient stake.
-    function registerOperator(address signingKey) external {
-        if (signingKey == address(0)) revert ZeroAddress();
-        if (operators[msg.sender].registered) revert AlreadyRegistered();
-
-        operators[msg.sender] = Operator({registered: true, signingKey: signingKey});
-        operatorCount++;
-        emit OperatorRegistered(msg.sender, signingKey);
-    }
-
-    /// @notice Deregister an operator.
-    function deregisterOperator() external {
-        if (!operators[msg.sender].registered) revert NotRegistered();
-        delete operators[msg.sender];
-        operatorCount--;
-        emit OperatorDeregistered(msg.sender);
-    }
+    function addPendingAdmin(address) external onlyOwner {}
+    function removePendingAdmin(address) external onlyOwner {}
+    function removeAdmin(address) external onlyOwner {}
+    function setAppointee(address, address, bytes4) external onlyOwner {}
+    function removeAppointee(address, address, bytes4) external onlyOwner {}
+    function deregisterOperatorFromOperatorSets(address, uint32[] memory) external onlyStakeRegistry {}
 
     // -----------------------------------------------------------------
     // Task creation
     // -----------------------------------------------------------------
 
-    /// @notice Create a new score task. Anyone can create tasks — the AVS
-    ///         task creator (off-chain) or the owner would typically do this
-    ///         on a cadence (e.g. every N blocks for flagged addresses).
-    /// @param subject The address to score.
-    /// @param fromBlock Start of the observation window.
-    /// @param toBlock End of the observation window.
-    function createScoreTask(address subject, uint32 fromBlock, uint32 toBlock) external returns (uint32 taskId) {
+    function createScoreTask(address subject, uint32 fromBlock, uint32 toBlock)
+        external
+        returns (uint32 taskId)
+    {
         if (subject == address(0)) revert ZeroAddress();
         if (fromBlock >= toBlock) revert InvalidBlockRange();
 
@@ -146,44 +122,29 @@ contract GradientShieldServiceManager {
     // Task response (operator submits verified score)
     // -----------------------------------------------------------------
 
-    /// @notice Submit a signed score for a task.
-    /// @param taskId The task to respond to.
-    /// @param score The computed MEV risk score (0–100).
-    /// @param signature ECDSA signature over keccak256(taskId, subject, score)
-    ///        signed by the operator's registered signing key.
-    /// @dev The flow:
-    ///   1. Check the task exists and hasn't been responded to.
-    ///   2. Recover the signer from the signature.
-    ///   3. Find the operator whose signingKey matches.
-    ///   4. If valid → call oracle.setScore(subject, score).
-    ///
-    ///   In production with BLS + quorum:
-    ///   - Multiple operators sign independently.
-    ///   - An aggregator bundles signatures into one aggregated BLS sig.
-    ///   - This function checks the aggregated sig against the quorum threshold.
-    ///   - Only if quorum is met does the score get written.
     function respondToTask(uint32 taskId, uint16 score, bytes calldata signature) external {
         if (taskId >= tasks.length) revert InvalidTaskId();
         ScoreTask storage task = tasks[taskId];
         if (task.responded) revert TaskAlreadyResponded();
 
+        // Verify the caller is a registered operator in the stake registry
+        ECDSAStakeRegistry registry = ECDSAStakeRegistry(stakeRegistry);
+        if (!registry.operatorRegistered(msg.sender)) revert OperatorNotRegistered();
+
         // Build the message the operator should have signed
         bytes32 messageHash = keccak256(abi.encodePacked(taskId, task.subject, score));
-        bytes32 ethSignedHash = messageHash.toEthSignedMessageHash();
+        bytes32 ethSignedHash = ECDSA.toEthSignedMessageHash(messageHash);
 
-        // Recover signer
+        // Recover signer and verify it matches the operator's registered signing key
         address signer = ethSignedHash.recover(signature);
-
-        // Verify the signer is a registered operator's signing key
-        address operatorAddr = msg.sender;
-        if (!operators[operatorAddr].registered) revert NotRegistered();
-        if (operators[operatorAddr].signingKey != signer) revert InvalidSignature();
+        address registeredKey = registry.getLatestOperatorSigningKey(msg.sender);
+        if (signer != registeredKey) revert InvalidSignature();
 
         // Mark responded and write the score
         task.responded = true;
         oracle.setScore(task.subject, score);
 
-        emit ScoreTaskResponded(taskId, task.subject, score, operatorAddr);
+        emit ScoreTaskResponded(taskId, task.subject, score, msg.sender);
     }
 
     // -----------------------------------------------------------------

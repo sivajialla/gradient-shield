@@ -1,0 +1,15 @@
+{
+  "name": "gradient-shield-operator",
+  "version": "1.0.0",
+  "description": "Off-chain AVS operator for GradientShield — watches for score tasks, computes MEV risk scores, and submits verified responses.",
+  "type": "module",
+  "scripts": {
+    "operator": "node operator.js",
+    "create-task": "node createTask.js",
+    "score": "node scoreAddress.js"
+  },
+  "dependencies": {
+    "ethers": "^6.13.0",
+    "dotenv": "^16.4.0"
+  }
+}
