@@ -12,6 +12,94 @@ escalated fee; confirmed toxic flow is rejected outright.
 > heuristics, score decay, and AVS signature verification are stubbed out and
 > marked with `TODO`. See [What to build next](#what-to-build-next).
 
+---
+
+## How GradientShield works
+
+Instead of a binary allow/deny, the hook maps a continuous **0–100 risk score**
+onto a **graded fee response** — clean flow pays the base fee, suspicious flow
+pays triple, and confirmed toxic flow is rejected outright. The name is the
+mechanism: a *gradient* that *shields* the pool.
+
+Two systems work together:
+
+1. **On-chain (deterministic):** `GradientShieldHook` runs inside the
+   PoolManager's `beforeSwap` callback. It reads one number from the
+   `ScoringOracle`, makes a fee decision, and emits telemetry — all
+   synchronous, all in the same transaction.
+
+2. **Off-chain (the feedback loop):** An EigenLayer AVS operator indexes the
+   emitted `SwapTelemetry` events, computes MEV/sandwich scores across blocks,
+   and writes updated scores back to the oracle via `setScore`. This is the loop
+   that makes the response *escalate over time*.
+
+### Architecture & data flow
+
+```mermaid
+flowchart LR
+    subgraph ON-CHAIN
+        A[Swapper<br><i>EOA / MEV bot</i>] -->|"swap()"| B[PoolManager<br><i>uniswap v4-core</i>]
+        B -->|"sender"| C["<b>GradientShieldHook</b><br>beforeSwap()<br><i>score → fee decision</i>"]
+        C -->|"getScore()"| D[ScoringOracle<br><i>score per address</i>]
+        D -->|"uint16"| C
+
+        C --> E{Score?}
+        E -->|"0 – 39"| F["✅ Base fee<br>0.30% · pass through"]
+        E -->|"40 – 79"| G["⚠️ Escalated fee<br>3× · FeeEscalated"]
+        E -->|"80 – 100"| H["❌ Rejected<br>revert BotRejected"]
+
+        F --> I[SwapTelemetry<br><i>event log · every swap</i>]
+        G --> I
+    end
+
+    subgraph OFF-CHAIN
+        J[AVS Operator<br><i>EigenLayer · indexes & scores</i>]
+    end
+
+    I -.->|"index events"| J
+    J -.->|"setScore() · AVS-gated"| D
+```
+
+> **Why this split.** Detection that needs cross-transaction, cross-block
+> context is too expensive and too limited to do fully on-chain — so scoring
+> lives in the AVS, while the hook keeps only the cheap, synchronous decision:
+> read one number, price or reject. The oracle is the narrow, verifiable
+> interface between the two, and its daily decay means an address that stops
+> attacking is gradually forgiven rather than permanently banned.
+
+### Score → fee ladder
+
+| Score | Band | Behaviour | Events |
+|:-----:|:----:|-----------|--------|
+| **0–39** | Clean / unknown | Pays the **base fee** (3000 pips = 0.30%). Swap passes through; telemetry emitted for the AVS. | `SwapTelemetry` |
+| **40–79** | Suspicious | Charged **3× base fee** via dynamic-fee override. Extraction is still possible, just expensive. | `FeeEscalated`, `SwapTelemetry` |
+| **80–100** | Confirmed toxic | Swap **reverts** with `BotRejected`. Nothing settles; the pool never touches the flow. | `BotRejectedEvent` |
+
+### What runs on every swap (`_beforeSwap`)
+
+The hook's `_beforeSwap` callback is the entire on-chain decision, executed
+synchronously before the pool math:
+
+| Step | Action | Detail |
+|:----:|--------|--------|
+| 1 | **Read the score** | Call `oracle.getScore(sender)` — a decay-adjusted `uint16` for the swapper |
+| 2 | **Hard gate** | If `score ≥ 80`, emit `BotRejectedEvent` and `revert BotRejected`. Transaction dies here |
+| 3 | **Detect the pattern** | Compare against `_lastSwapBlock[pool][sender]` for front-run/back-run cadence → `SandwichDetected` *(TODO)* |
+| 4 | **Price it** | If `score ≥ 40`, fee = `BASE_FEE × 3` and emit `FeeEscalated`; else fee = `BASE_FEE` |
+| 5 | **Emit telemetry** | Log `SwapTelemetry(pool, sender, dir, amount, score, fee, block)` for the AVS to index |
+| 6 | **Return the override** | Hand the pool a dynamic-fee override (`OVERRIDE_FEE_FLAG` set) so the pool charges the chosen fee |
+
+### Component responsibilities
+
+| Component | Layer | Responsibility |
+|-----------|:-----:|----------------|
+| `GradientShieldHook` | on-chain | The v4 hook. Reads the score in `beforeSwap`, applies the fee ladder, runs sandwich/JIT checks, emits telemetry, returns the fee override. Declares `beforeSwap` + `before{Add,Remove}Liquidity` permissions. |
+| `ScoringOracle` | on-chain | Stores one score per address with a daily linear decay. Reads are open; writes are AVS-gated (`setScore` / `bumpScore`). Owner can rotate the AVS writer. |
+| `PoolManager` | on-chain | Uniswap v4-core. Invokes the hook around each swap and honours the returned dynamic-fee override (pool must be initialised with a dynamic fee). |
+| AVS Operator | off-chain | EigenLayer operator node. Indexes `SwapTelemetry`, computes MEV/sandwich scores off-chain, and writes them back via `setScore`. This is the loop that makes the response escalate. |
+
+---
+
 ## Prerequisites
 
 - [Foundry](https://book.getfoundry.sh/getting-started/installation)
@@ -60,18 +148,16 @@ contract a pool points at.
 
 - **Config constants** — `SUSPICIOUS_THRESHOLD` (40), `REJECT_THRESHOLD` (80),
   `ESCALATION_MULTIPLIER` (3), `BASE_FEE` (3000 pips = 0.30%). These define the
-  fee ladder below.
+  fee ladder above.
 - **State** — an immutable reference to the `ScoringOracle`, plus
   `_lastSwapBlock[poolId][swapper]` bookkeeping used by the (TODO) sandwich
   heuristic.
 - **`getHookPermissions()`** — declares which v4 callbacks are active:
   `beforeSwap`, `beforeAddLiquidity`, `beforeRemoveLiquidity`. These flags must
   match the deployed address (see `Deploy.s.sol`).
-- **`_beforeSwap(...)`** — the core logic. Reads the caller's score from the
-  oracle, then: rejects (`revert BotRejected`) at/above `REJECT_THRESHOLD`,
-  charges 3× fee (`FeeEscalated`) at/above `SUSPICIOUS_THRESHOLD`, emits
-  `SwapTelemetry` on every swap, and returns the fee as a dynamic-fee override.
-  Sandwich detection is a marked `TODO` here.
+- **`_beforeSwap(...)`** — the core logic described in the
+  [beforeSwap sequence](#what-runs-on-every-swap-_beforeswap) above. Sandwich
+  detection is a marked `TODO`.
 - **`_beforeAddLiquidity` / `_beforeRemoveLiquidity`** — pass-throughs today;
   the entry points for the (TODO) JIT-liquidity heuristic.
 - **Events** — `SwapTelemetry`, `SandwichDetected`, `JITDetected`,
@@ -100,17 +186,19 @@ the hook.
 
 #### `test/HookBehavior.t.sol` — hook mechanics
 
-Tests that make `GradientShieldHook` a *valid, correctly-priced* v4 hook, independent
-of any attack scenario: `test_permissionsFlags` (declared vs. address flags),
-`test_baseFeeForCleanSwapper` (score 0 → base fee), `test_dynamicFeeOverrideApplied`
-(the fee override is actually charged). All skipped pending pool fixtures.
+Tests that make `GradientShieldHook` a *valid, correctly-priced* v4 hook,
+independent of any attack scenario: `test_permissionsFlags` (declared vs.
+address flags), `test_baseFeeForCleanSwapper` (score 0 → base fee),
+`test_dynamicFeeOverrideApplied` (the fee override is actually charged). All
+skipped pending pool fixtures.
 
 #### `test/MEVAttackDefense.t.sol` — MEV attacks
 
-Tests the defenses: `test_sandwichPatternIsDetected`, `test_jitLiquidityIsDetected`,
-and the headline `test_sandwichBotSimulation` — the full escalation demo (bot
-sandwiches → scored 60 → pays 3× → scored 95 → rejected). All skipped pending
-detection logic. Each test body sketches the intended flow in comments.
+Tests the defenses: `test_sandwichPatternIsDetected`,
+`test_jitLiquidityIsDetected`, and the headline `test_sandwichBotSimulation` —
+the full escalation demo (bot sandwiches → scored 60 → pays 3× → scored 95 →
+rejected). All skipped pending detection logic. Each test body sketches the
+intended flow in comments.
 
 #### `test/ScoringOracle.t.sol` — scoring in isolation
 
@@ -122,9 +210,9 @@ Unit tests for the oracle with no hook involved. `test_onlyAvsCanSetScore` and
 
 A `forge script` that deploys the oracle, mines a CREATE2 salt with `HookMiner`
 so the hook lands at an address whose low bits encode its permission flags,
-deploys `GradientShieldHook` to that mined address, and asserts the address matches.
-Reads `POOL_MANAGER` and `PRIVATE_KEY` from the environment. Pool initialisation
-and wiring the real AVS ServiceManager are marked `TODO`.
+deploys `GradientShieldHook` to that mined address, and asserts the address
+matches. Reads `POOL_MANAGER` and `PRIVATE_KEY` from the environment. Pool
+initialisation and wiring the real AVS ServiceManager are marked `TODO`.
 
 #### Config & tooling
 
@@ -161,14 +249,6 @@ git clone --recurse-submodules https://github.com/sivajialla/gradient-shield.git
 # already cloned? then:
 make install    # git submodule update --init --recursive && forge install
 ```
-
-## Score → fee ladder
-
-| Score    | Behaviour                                            |
-| -------- | ---------------------------------------------------- |
-| 0–39     | Base dynamic fee                                     |
-| 40–79    | Base fee × 3 (`FeeEscalated` emitted)                |
-| 80–100   | Swap reverts with `BotRejected` (`BotRejectedEvent`) |
 
 ## Deploy to testnet
 
