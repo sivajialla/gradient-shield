@@ -41,9 +41,10 @@ contract ScoringOracle {
     /// @notice Raw, non-decayed score record per address.
     mapping(address => ScoreRecord) internal _records;
 
-    /// @notice Authorised writer — the AVS service manager / operator relay.
-    /// @dev TODO: replace single-writer model with EigenLayer ServiceManager
-    ///      signature verification (quorum of operator sigs).
+    /// @notice Authorised writer — the GradientShieldServiceManager contract.
+    /// @dev Only the ServiceManager can call setScore/bumpScore. The ServiceManager
+    ///      itself verifies operator signatures before writing, so this single-address
+    ///      gate is backed by the full operator verification flow.
     address public avs;
 
     address public owner;
@@ -82,9 +83,11 @@ contract ScoringOracle {
     // Constructor
     // ---------------------------------------------------------------------
 
+    /// @param _avs The GradientShieldServiceManager contract address. Only this
+    ///        address can write scores. Pass address(0) to set it later via setAvs.
     constructor(address _avs) {
         owner = msg.sender;
-        avs = _avs; // may be address(0) initially; set later via setAvs
+        avs = _avs;
     }
 
     // ---------------------------------------------------------------------
@@ -92,9 +95,8 @@ contract ScoringOracle {
     // ---------------------------------------------------------------------
 
     /// @notice Set the absolute score for an address.
-    /// @dev TODO: accept operator signatures / task response instead of a bare
-    ///      onlyAvs write once wired to EigenLayer.
-    /// This is the function that tells that address has certain score by AVS.
+    /// @dev Called by the GradientShieldServiceManager after it verifies the
+    ///      operator's ECDSA signature on the task response.
     function setScore(address subject, uint16 newScore) external onlyAvs {
         if (newScore > MAX_SCORE) revert ScoreOutOfRange(newScore);
         // saves the old score for the event
