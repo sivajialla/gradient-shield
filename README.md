@@ -182,19 +182,64 @@ signatory record, proving the quorum was not properly formed.
 
 ---
 
-## Prerequisites
+## Getting started (local reproduction)
 
-- [Foundry](https://book.getfoundry.sh/getting-started/installation)
-- Git
+### Prerequisites
 
-## Build & test
+| Tool | Version | Install |
+|------|---------|---------|
+| **Foundry** (forge, cast, anvil) | Latest | [getfoundry.sh](https://book.getfoundry.sh/getting-started/installation) |
+| **Git** | 2.x+ | System package manager |
+| **Node.js** (for off-chain operator) | 18+ | [nodejs.org](https://nodejs.org) |
+
+### Step 1 — Clone the repository
+
+```bash
+git clone --recurse-submodules https://github.com/sivajialla/gradient-shield.git
+cd gradient-shield
+```
+
+If you already cloned without `--recurse-submodules`:
+
+```bash
+git submodule update --init --recursive
+```
+
+### Step 2 — Install Solidity compilers
+
+The project needs **two solc versions** (v4-core requires 0.8.26, EigenLayer
+middleware requires 0.8.27). Foundry's `auto_detect_solc = true` handles this
+automatically — it downloads the right compiler per file. No manual solc install
+needed if you have internet access during the first build.
+
+If you're on macOS and solc auto-download fails, install them manually:
+
+```bash
+# Download solc 0.8.26
+curl -L https://github.com/ethereum/solidity/releases/download/v0.8.26/solc-macos \
+  -o ~/.svm/0.8.26/solc-0.8.26 && chmod +x ~/.svm/0.8.26/solc-0.8.26
+
+# Download solc 0.8.27
+curl -L https://github.com/ethereum/solidity/releases/download/v0.8.27/solc-macos \
+  -o ~/.svm/0.8.27/solc-0.8.27 && chmod +x ~/.svm/0.8.27/solc-0.8.27
+```
+
+### Step 3 — Build
 
 ```bash
 forge build
+```
+
+First build takes ~30-60 seconds as it compiles all dependencies (v4-core,
+eigenlayer-middleware, OpenZeppelin). Subsequent builds are incremental.
+
+### Step 4 — Run the tests
+
+```bash
 forge test -vvv
 ```
 
-All 52 tests pass across 6 test suites:
+All 52 tests should pass:
 
 | Suite | Tests | What it covers |
 |-------|:-----:|----------------|
@@ -204,6 +249,68 @@ All 52 tests pass across 6 test suites:
 | `HookBehavior.t.sol` | 5 | Fee ladder, dynamic fee override, permissions |
 | `MEVAttackDefense.t.sol` | 6 | Sandwich/JIT detection, full escalation flow |
 | `DemoSimulation.t.sol` | 5 | End-to-end scoring scenarios with BLS quorum |
+
+### Step 5 — Run the demo scenarios
+
+Watch the 5-scenario scoring demo with console output:
+
+```bash
+forge test --match-path test/DemoSimulation.t.sol -vvv
+```
+
+This shows clean traders, occasional MEV extractors, persistent sandwich bots,
+reformed bots decaying back to clean, and a side-by-side comparison — all scored
+through the BLS quorum flow.
+
+### Step 6 — Set up the off-chain operator (optional)
+
+The `operator/` directory contains a Node.js operator that watches for scoring
+tasks and submits responses. To set it up:
+
+```bash
+cd operator
+npm install
+```
+
+Create a `.env` file in the `operator/` directory:
+
+```env
+PRIVATE_KEY=<your_private_key>
+RPC_URL=<sepolia_rpc_url>
+SERVICE_MANAGER_ADDRESS=<deployed_service_manager_address>
+TASK_MANAGER_ADDRESS=<deployed_task_manager_address>
+ORACLE_ADDRESS=<deployed_oracle_address>
+```
+
+Run the operator:
+
+```bash
+npm run operator        # start the operator node (watches for tasks)
+npm run create-task     # create a scoring task
+npm run score           # check an address's current score
+```
+
+### Makefile shortcuts
+
+```bash
+make help               # list all available targets
+make build              # forge build
+make test               # forge test -vvv
+make demo               # run the 5-scenario demo
+make fmt                # format Solidity sources
+make clean              # remove build artifacts
+make deploy             # deploy to testnet (needs env vars)
+```
+
+### Troubleshooting
+
+| Problem | Fix |
+|---------|-----|
+| `submodule not found` | Run `git submodule update --init --recursive` |
+| `solc 0.8.26 not found` | See Step 2 above for manual solc install |
+| `HookAddressNotValid` | The hook address must encode permission flags in its bottom 14 bits — `HookMiner.find()` handles this via CREATE2 salt mining |
+| `Stack too deep` | Some deploy scripts need `--via-ir` — run `forge script ... --via-ir` |
+| Tests fail with `EvmError: Revert` | Make sure submodules are at the pinned revisions — `git submodule update --init --recursive` |
 
 ## Repository layout
 
@@ -250,12 +357,6 @@ version.
 | `v4-periphery` | `3779387` | Last commit with `src/utils/BaseHook.sol` (removed in #510) |
 | `eigenlayer-middleware` | v1.5 | BLS infrastructure (`BLSSignatureChecker`, `ServiceManagerBase`, `RegistryCoordinator`) |
 | `forge-std` | `v1.16.2` | -- |
-
-Clone recursively:
-
-```bash
-git clone --recurse-submodules https://github.com/sivajialla/gradient-shield.git
-```
 
 ## Deploy
 
