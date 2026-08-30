@@ -1,21 +1,67 @@
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import './SwapPanel.css';
 
 const ORACLE_ADDRESS = '0x019d874fdfea12ddcb729ab0abb0a34202652289';
 const ETHERSCAN = 'https://sepolia.etherscan.io';
 
-const PRICE_MAP: Record<string, number> = {
-  'ETH-USDC': 2450, 'USDC-ETH': 1 / 2450,
-  'ETH-DAI': 2450, 'DAI-ETH': 1 / 2450,
-  'ETH-WBTC': 0.04, 'WBTC-ETH': 25,
-  'USDC-DAI': 1, 'DAI-USDC': 1,
-  'USDC-WBTC': 1 / 61000, 'WBTC-USDC': 61000,
-  'DAI-WBTC': 1 / 61000, 'WBTC-DAI': 61000,
-  'ETH-LINK': 170, 'LINK-ETH': 1 / 170,
-  'USDC-LINK': 1 / 14.4, 'LINK-USDC': 14.4,
-  'DAI-LINK': 1 / 14.4, 'LINK-DAI': 14.4,
-  'WBTC-LINK': 4236, 'LINK-WBTC': 1 / 4236,
+const COINGECKO_IDS: Record<string, string> = {
+  ETH: 'ethereum',
+  USDC: 'usd-coin',
+  WBTC: 'bitcoin',
+  DAI: 'dai',
+  LINK: 'chainlink',
 };
+
+const FALLBACK_USD: Record<string, number> = {
+  ETH: 2450, USDC: 1, WBTC: 61000, DAI: 1, LINK: 14.4,
+};
+
+function buildPriceMap(usdPrices: Record<string, number>): Record<string, number> {
+  const tokens = Object.keys(usdPrices);
+  const map: Record<string, number> = {};
+  for (const from of tokens) {
+    for (const to of tokens) {
+      if (from !== to) {
+        map[`${from}-${to}`] = usdPrices[from] / usdPrices[to];
+      }
+    }
+  }
+  return map;
+}
+
+function useLivePrices() {
+  const [usdPrices, setUsdPrices] = useState<Record<string, number>>(FALLBACK_USD);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const [isLive, setIsLive] = useState(false);
+
+  const fetchPrices = useCallback(async () => {
+    try {
+      const ids = Object.values(COINGECKO_IDS).join(',');
+      const res = await fetch(
+        `https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd`
+      );
+      if (!res.ok) return;
+      const data = await res.json();
+      const prices: Record<string, number> = {};
+      for (const [symbol, geckoId] of Object.entries(COINGECKO_IDS)) {
+        prices[symbol] = data[geckoId]?.usd ?? FALLBACK_USD[symbol];
+      }
+      setUsdPrices(prices);
+      setLastUpdated(new Date());
+      setIsLive(true);
+    } catch {
+      setIsLive(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchPrices();
+    const interval = setInterval(fetchPrices, 30_000);
+    return () => clearInterval(interval);
+  }, [fetchPrices]);
+
+  return { usdPrices, priceMap: buildPriceMap(usdPrices), lastUpdated, isLive, refresh: fetchPrices };
+}
 
 function calcFee(score: number): { bps: number; label: string; band: string; badgeClass: string } {
   if (score >= 80) return { bps: -1, label: 'REJECTED', band: 'Rejected', badgeClass: 'badge-red' };
@@ -36,13 +82,15 @@ export default function SwapPanel({ isConnected }: Props) {
   const [slippage, setSlippage] = useState('0.5');
   const [demoScore, setDemoScore] = useState(15);
 
+  const { usdPrices, priceMap, lastUpdated, isLive, refresh } = useLivePrices();
+
   const tokens = ['ETH', 'USDC', 'WBTC', 'DAI', 'LINK'];
   const fee = calcFee(demoScore);
   const pair = `${fromToken}-${toToken}`;
-  const directPrice = PRICE_MAP[pair];
+  const directPrice = priceMap[pair];
   const needsMultiHop = !directPrice && fromToken !== toToken;
-  const price = directPrice ?? (PRICE_MAP[`${fromToken}-ETH`] && PRICE_MAP[`ETH-${toToken}`]
-    ? PRICE_MAP[`${fromToken}-ETH`]! * PRICE_MAP[`ETH-${toToken}`]!
+  const price = directPrice ?? (priceMap[`${fromToken}-ETH`] && priceMap[`ETH-${toToken}`]
+    ? priceMap[`${fromToken}-ETH`]! * priceMap[`ETH-${toToken}`]!
     : 1);
   const route = fromToken === toToken ? fromToken : needsMultiHop ? `${fromToken} → ETH → ${toToken}` : `${fromToken} → ${toToken}`;
   const hops = needsMultiHop ? 2 : 1;
@@ -69,6 +117,24 @@ export default function SwapPanel({ isConnected }: Props) {
     <div className="swap-container">
       <div className="card swap-panel">
         <div className="card-title">Swap (GradientShield Protected)</div>
+
+        <div className="live-price-bar">
+          <span className={`live-dot ${isLive ? 'live' : 'stale'}`} />
+          <span className="live-label">{isLive ? 'Live prices' : 'Fallback prices'}</span>
+          {lastUpdated && (
+            <span className="live-time">
+              Updated {lastUpdated.toLocaleTimeString()}
+            </span>
+          )}
+          <button className="live-refresh" onClick={refresh} title="Refresh prices">&#8635;</button>
+          <span className="live-prices-list">
+            {tokens.map(t => (
+              <span key={t} className="live-price-chip">
+                {t} ${usdPrices[t] < 10 ? usdPrices[t].toFixed(2) : usdPrices[t].toLocaleString(undefined, { maximumFractionDigits: 0 })}
+              </span>
+            ))}
+          </span>
+        </div>
 
         <div className="demo-score-control">
           <div className="demo-score-header">
