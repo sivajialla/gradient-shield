@@ -1,0 +1,133 @@
+.event-feed {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.event-feed-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--green);
+  animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+.event-filters {
+  display: flex;
+  gap: 4px;
+}
+
+.filter-btn {
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: none;
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.filter-btn.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+
+.filter-btn:hover:not(.active) {
+  border-color: var(--text-muted);
+}
+
+.event-table-wrap {
+  overflow-x: auto;
+}
+
+.event-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.event-table th {
+  text-align: left;
+  padding: 8px 12px;
+  color: var(--text-muted);
+  font-weight: 500;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  border-bottom: 1px solid var(--border);
+}
+
+.event-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(42, 54, 80, 0.5);
+  color: var(--text-secondary);
+}
+
+.event-row {
+  transition: background 0.2s;
+}
+
+.event-row:hover {
+  background: var(--bg-card-hover);
+}
+
+.event-sandwich td,
+.event-rejection td {
+  background: rgba(239, 68, 68, 0.03);
+}
+
+.mono {
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 12px;
+}
+
+.score-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.score-pill.green {
+  background: var(--green-bg);
+  color: var(--green);
+}
+
+.score-pill.yellow {
+  background: var(--yellow-bg);
+  color: var(--yellow);
+}
+
+.score-pill.red {
+  background: var(--red-bg);
+  color: var(--red);
+}
+
+.rejected-text {
+  color: var(--red) !important;
+  font-weight: 600;
+}
+
+.time-cell {
+  color: var(--text-muted) !important;
+  font-size: 12px;
+}

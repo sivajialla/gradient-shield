@@ -1,0 +1,138 @@
+.task-dashboard {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.task-stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+}
+
+@media (max-width: 768px) {
+  .task-stats {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+.stat-card {
+  text-align: center;
+  padding: 20px;
+}
+
+.stat-value {
+  font-size: 32px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.stat-green { color: var(--green); }
+.stat-yellow { color: var(--yellow); }
+.stat-red { color: var(--red); }
+
+.stat-label {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+
+.task-table-wrap {
+  overflow-x: auto;
+}
+
+.task-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.task-table th {
+  text-align: left;
+  padding: 8px 12px;
+  color: var(--text-muted);
+  font-weight: 500;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  border-bottom: 1px solid var(--border);
+}
+
+.task-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(42, 54, 80, 0.5);
+  color: var(--text-secondary);
+}
+
+.task-row:hover td {
+  background: var(--bg-card-hover);
+}
+
+.trigger-badge {
+  font-size: 14px;
+}
+
+.pending-dots {
+  color: var(--text-muted);
+  letter-spacing: 2px;
+}
+
+.quorum-flow {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 16px 0;
+  overflow-x: auto;
+}
+
+@media (max-width: 768px) {
+  .quorum-flow {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .flow-arrow {
+    transform: rotate(90deg);
+    align-self: center;
+  }
+}
+
+.flow-step {
+  flex: 1;
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  min-width: 180px;
+}
+
+.flow-circle {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: rgba(59, 130, 246, 0.15);
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.flow-content strong {
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.flow-content p {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 4px;
+  line-height: 1.4;
+}
+
+.flow-arrow {
+  color: var(--text-muted);
+  font-size: 20px;
+  padding-top: 4px;
+  flex-shrink: 0;
+}

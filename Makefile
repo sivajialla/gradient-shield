@@ -6,7 +6,7 @@
 export
 
 .DEFAULT_GOAL := help
-.PHONY: help install build test test-verbose sim demo fmt fmt-check clean deploy deploy-sepolia snapshot operator create-task score sizes mine-hook
+.PHONY: help install build test test-verbose sim demo fmt fmt-check clean deploy deploy-sepolia snapshot operator create-task score sizes mine-hook frontend
 
 ## help: list available targets
 help:
@@ -17,11 +17,12 @@ help:
 # Setup
 # ───────────────────────────────────────────────────────
 
-## install: fetch all dependencies (forge libs + operator npm packages)
+## install: fetch all dependencies (forge libs + operator + frontend npm packages)
 install:
 	git submodule update --init --recursive
 	forge install
 	cd operator && npm install
+	cd frontend && npm install
 
 # ───────────────────────────────────────────────────────
 # Build
@@ -43,7 +44,7 @@ sizes:
 # Test
 # ───────────────────────────────────────────────────────
 
-## test: run the full test suite (52 tests across 6 suites)
+## test: run the full test suite (60 tests across 8 suites)
 test:
 	forge test -vvv
 
@@ -112,3 +113,11 @@ create-task:
 ## score: look up a live score from the deployed oracle
 score:
 	cd operator && npm run score
+
+# ───────────────────────────────────────────────────────
+# Frontend (demo UI)
+# ───────────────────────────────────────────────────────
+
+## frontend: start the demo UI dev server (http://localhost:5173)
+frontend:
+	cd frontend && npm run dev
