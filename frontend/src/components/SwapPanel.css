@@ -512,3 +512,129 @@
   font-size: 11px;
   color: var(--text-muted);
 }
+
+/* BLS Quorum section */
+.quorum-section {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.quorum-threshold-control {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.quorum-slider-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.quorum-slider-row .slider {
+  flex: 1;
+  height: 6px;
+  border-radius: 3px;
+  outline: none;
+  cursor: pointer;
+  -webkit-appearance: none;
+  background: var(--border);
+}
+
+.quorum-slider-row .slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: currentColor;
+  cursor: pointer;
+}
+
+.quorum-value {
+  font-family: var(--font-heading);
+  font-weight: 700;
+  font-size: 22px;
+  min-width: 52px;
+  text-align: right;
+}
+
+.quorum-presets {
+  display: flex;
+  gap: 6px;
+}
+
+.quorum-presets .preset-btn {
+  color: var(--text-muted);
+}
+
+.quorum-presets .preset-active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.quorum-visual {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.quorum-operators {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+}
+
+.operator-node {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.operator-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  font-weight: 700;
+  transition: all 0.3s;
+}
+
+.operator-node.approved .operator-icon {
+  background: var(--green-bg);
+  color: var(--green);
+  border: 2px solid var(--green);
+}
+
+.operator-node.pending .operator-icon {
+  background: var(--bg-input);
+  color: var(--text-muted);
+  border: 2px solid var(--border);
+}
+
+.operator-label {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.quorum-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.quorum-note {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}

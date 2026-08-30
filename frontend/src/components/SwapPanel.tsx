@@ -73,9 +73,11 @@ function calcFee(score: number): { bps: number; label: string; band: string; bad
 interface Props {
   isConnected: boolean;
   address?: `0x${string}`;
+  quorumThreshold: number;
+  onQuorumChange: (v: number) => void;
 }
 
-export default function SwapPanel({ isConnected }: Props) {
+export default function SwapPanel({ isConnected, quorumThreshold, onQuorumChange }: Props) {
   const [fromToken, setFromToken] = useState('ETH');
   const [toToken, setToToken] = useState('USDC');
   const [amount, setAmount] = useState('1.0');
@@ -104,6 +106,12 @@ export default function SwapPanel({ isConnected }: Props) {
 
   const noFeeOutput = inputNum * price * (1 - 3000 / 1_000_000);
   const extraFeeCost = isRejected ? outputBeforeFee : (noFeeOutput - outputAfterFee);
+
+  const totalOperators = 5;
+  const approvedCount = Math.ceil(totalOperators * quorumThreshold / 100);
+  const quorumMet = approvedCount >= Math.ceil(totalOperators * quorumThreshold / 100);
+  const protectionLevel = quorumThreshold >= 80 ? 'Maximum' : quorumThreshold >= 60 ? 'Strong' : 'Basic';
+  const protectionColor = quorumThreshold >= 80 ? 'var(--green)' : quorumThreshold >= 60 ? 'var(--yellow)' : 'var(--orange)';
 
   const handleSwapTokens = () => {
     const tmp = fromToken;
@@ -285,20 +293,72 @@ export default function SwapPanel({ isConnected }: Props) {
               </div>
             </div>
           </div>
+        </div>
 
-          <div className="contract-links">
-            <h4>Deployed Contracts (Sepolia)</h4>
-            <a href={`${ETHERSCAN}/address/${ORACLE_ADDRESS}`} target="_blank" rel="noopener noreferrer" className="contract-link">
-              ScoringOracle: {ORACLE_ADDRESS.slice(0, 8)}...{ORACLE_ADDRESS.slice(-6)}
-              <span className="link-icon">&#8599;</span>
-            </a>
+        <div className="quorum-section">
+          <div className="card-title" style={{ fontSize: '15px', marginBottom: '12px' }}>BLS Quorum Threshold</div>
+
+          <div className="quorum-threshold-control">
+            <div className="quorum-slider-row">
+              <input
+                type="range" min="30" max="100" value={quorumThreshold}
+                onChange={e => onQuorumChange(Number(e.target.value))}
+                className="slider"
+                style={{ accentColor: protectionColor }}
+              />
+              <span className="quorum-value" style={{ color: protectionColor }}>{quorumThreshold}%</span>
+            </div>
+            <div className="quorum-presets">
+              <button className={`preset-btn ${quorumThreshold === 50 ? 'preset-active' : ''}`} onClick={() => onQuorumChange(50)}>50%</button>
+              <button className={`preset-btn ${quorumThreshold === 67 ? 'preset-active' : ''}`} onClick={() => onQuorumChange(67)}>67%</button>
+              <button className={`preset-btn ${quorumThreshold === 80 ? 'preset-active' : ''}`} onClick={() => onQuorumChange(80)}>80%</button>
+              <button className={`preset-btn ${quorumThreshold === 100 ? 'preset-active' : ''}`} onClick={() => onQuorumChange(100)}>100%</button>
+            </div>
           </div>
 
-          <div className="fee-formula-box">
-            <strong>Fee Formula</strong>
-            <code>fee = 3000 + (15000 - 3000) × (score - 40) / 40</code>
-            <span className="formula-note">Score &lt; 40: base fee (0.30%) | Score 40-79: escalating | Score ≥ 80: reverted</span>
+          <div className="quorum-visual">
+            <div className="quorum-operators">
+              {Array.from({ length: totalOperators }).map((_, i) => (
+                <div key={i} className={`operator-node ${i < approvedCount ? 'approved' : 'pending'}`}>
+                  <div className="operator-icon">{i < approvedCount ? '✓' : '•'}</div>
+                  <span className="operator-label">Op {i + 1}</span>
+                </div>
+              ))}
+            </div>
+            <div className="quorum-summary">
+              <div className="protection-row">
+                <span className="protection-label">Required Approvals</span>
+                <span className="protection-value">{approvedCount} / {totalOperators} operators</span>
+              </div>
+              <div className="protection-row">
+                <span className="protection-label">Quorum Status</span>
+                <span className="protection-value" style={{ color: quorumMet ? 'var(--green)' : 'var(--red)' }}>
+                  {quorumMet ? 'Met' : 'Not Met'}
+                </span>
+              </div>
+              <div className="protection-row">
+                <span className="protection-label">Protection Level</span>
+                <span className="protection-value" style={{ color: protectionColor }}>{protectionLevel}</span>
+              </div>
+            </div>
+            <p className="quorum-note">
+              Higher quorum = more operators must agree on the MEV score before it takes effect. More approvers means stronger protection but requires broader operator consensus.
+            </p>
           </div>
+        </div>
+
+        <div className="contract-links">
+          <h4>Deployed Contracts (Sepolia)</h4>
+          <a href={`${ETHERSCAN}/address/${ORACLE_ADDRESS}`} target="_blank" rel="noopener noreferrer" className="contract-link">
+            ScoringOracle: {ORACLE_ADDRESS.slice(0, 8)}...{ORACLE_ADDRESS.slice(-6)}
+            <span className="link-icon">&#8599;</span>
+          </a>
+        </div>
+
+        <div className="fee-formula-box">
+          <strong>Fee Formula</strong>
+          <code>fee = 3000 + (15000 - 3000) × (score - 40) / 40</code>
+          <span className="formula-note">Score &lt; 40: base fee (0.30%) | Score 40-79: escalating | Score ≥ 80: reverted</span>
         </div>
       </div>
     </div>

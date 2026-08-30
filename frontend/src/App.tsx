@@ -5,9 +5,6 @@ import Header from './components/Header';
 import ScoreLookup from './components/ScoreLookup';
 import FeeCurve from './components/FeeCurve';
 import SwapPanel from './components/SwapPanel';
-import EventFeed from './components/EventFeed';
-import TaskDashboard from './components/TaskDashboard';
-import ArchitectureDiagram from './components/ArchitectureDiagram';
 import MEVProtectionSim from './components/MEVProtectionSim';
 import SustainableLiquiditySim from './components/SustainableLiquiditySim';
 import './App.css';
@@ -16,7 +13,8 @@ function App() {
   const { address, isConnected } = useAccount();
   const { connect } = useConnect();
   const { disconnect } = useDisconnect();
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'swap' | 'protection' | 'tasks'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'swap' | 'protection'>('dashboard');
+  const [quorumThreshold, setQuorumThreshold] = useState(67);
 
   const getInitialTheme = (): 'dark' | 'light' => {
     try {
@@ -71,28 +69,23 @@ function App() {
         >
           Protection
         </button>
-        <button
-          className={`tab-btn ${activeTab === 'tasks' ? 'active' : ''}`}
-          onClick={() => setActiveTab('tasks')}
-        >
-          BLS Tasks
-        </button>
       </nav>
 
       <main className="main-content">
         {activeTab === 'dashboard' && (
-          <>
-            <div className="grid-2col">
-              <ScoreLookup connectedAddress={address} />
-              <FeeCurve />
-            </div>
-            <ArchitectureDiagram />
-            <EventFeed />
-          </>
+          <div className="grid-2col">
+            <ScoreLookup connectedAddress={address} />
+            <FeeCurve />
+          </div>
         )}
 
         {activeTab === 'swap' && (
-          <SwapPanel isConnected={isConnected} address={address} />
+          <SwapPanel
+            isConnected={isConnected}
+            address={address}
+            quorumThreshold={quorumThreshold}
+            onQuorumChange={setQuorumThreshold}
+          />
         )}
 
         {activeTab === 'protection' && (
@@ -100,10 +93,6 @@ function App() {
             <MEVProtectionSim />
             <SustainableLiquiditySim />
           </>
-        )}
-
-        {activeTab === 'tasks' && (
-          <TaskDashboard />
         )}
       </main>
 
