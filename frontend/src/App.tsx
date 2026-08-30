@@ -8,13 +8,15 @@ import SwapPanel from './components/SwapPanel';
 import EventFeed from './components/EventFeed';
 import TaskDashboard from './components/TaskDashboard';
 import ArchitectureDiagram from './components/ArchitectureDiagram';
+import MEVProtectionSim from './components/MEVProtectionSim';
+import SustainableLiquiditySim from './components/SustainableLiquiditySim';
 import './App.css';
 
 function App() {
   const { address, isConnected } = useAccount();
   const { connect } = useConnect();
   const { disconnect } = useDisconnect();
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'swap' | 'tasks'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'swap' | 'protection' | 'tasks'>('dashboard');
 
   const getInitialTheme = (): 'dark' | 'light' => {
     try {
@@ -64,6 +66,12 @@ function App() {
           Swap
         </button>
         <button
+          className={`tab-btn ${activeTab === 'protection' ? 'active' : ''}`}
+          onClick={() => setActiveTab('protection')}
+        >
+          Protection
+        </button>
+        <button
           className={`tab-btn ${activeTab === 'tasks' ? 'active' : ''}`}
           onClick={() => setActiveTab('tasks')}
         >
@@ -85,6 +93,13 @@ function App() {
 
         {activeTab === 'swap' && (
           <SwapPanel isConnected={isConnected} address={address} />
+        )}
+
+        {activeTab === 'protection' && (
+          <>
+            <MEVProtectionSim />
+            <SustainableLiquiditySim />
+          </>
         )}
 
         {activeTab === 'tasks' && (
