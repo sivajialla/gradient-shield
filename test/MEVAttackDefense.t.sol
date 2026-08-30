@@ -47,10 +47,10 @@ contract MEVAttackDefenseTest is Test, Deployers {
             address(this),
             flags,
             type(GradientShieldHook).creationCode,
-            abi.encode(manager, oracle, IScoreTaskCreator(address(0)))
+            abi.encode(manager, oracle, IScoreTaskCreator(address(0)), address(0))
         );
         hook = new GradientShieldHook{salt: salt}(
-            IPoolManager(manager), oracle, IScoreTaskCreator(address(0))
+            IPoolManager(manager), oracle, IScoreTaskCreator(address(0)), address(0)
         );
         require(address(hook) == hookAddr, "hook address mismatch");
 

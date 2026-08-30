@@ -98,19 +98,20 @@ contract Deploy is Script {
 
     function _deployHook(ScoringOracle oracle, GradientShieldTaskManager tm) internal {
         address poolManager = vm.envAddress("POOL_MANAGER");
+        address attestorAddr = vm.envOr("ATTESTOR", address(0));
 
         uint160 flags = uint160(
             Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG
         );
 
         bytes memory constructorArgs = abi.encode(
-            IPoolManager(poolManager), oracle, IScoreTaskCreator(address(tm))
+            IPoolManager(poolManager), oracle, IScoreTaskCreator(address(tm)), attestorAddr
         );
         (address hookAddress, bytes32 salt) =
             HookMiner.find(CREATE2_DEPLOYER, flags, type(GradientShieldHook).creationCode, constructorArgs);
 
         GradientShieldHook hook = new GradientShieldHook{salt: salt}(
-            IPoolManager(poolManager), oracle, IScoreTaskCreator(address(tm))
+            IPoolManager(poolManager), oracle, IScoreTaskCreator(address(tm)), attestorAddr
         );
         require(address(hook) == hookAddress, "Deploy: hook address mismatch");
         console2.log("GradientShieldHook:", address(hook));

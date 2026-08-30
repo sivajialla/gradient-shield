@@ -4,12 +4,15 @@ pragma solidity ^0.8.26;
 import {BaseHook} from "@uniswap/v4-periphery/src/utils/BaseHook.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {IUnlockCallback} from "@uniswap/v4-core/src/interfaces/callback/IUnlockCallback.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
-import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
+import {BalanceDelta, BalanceDeltaLibrary} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "@uniswap/v4-core/src/types/BeforeSwapDelta.sol";
 import {LPFeeLibrary} from "@uniswap/v4-core/src/libraries/LPFeeLibrary.sol";
+import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
 import {SwapParams, ModifyLiquidityParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
+import {TransientStateLibrary} from "@uniswap/v4-core/src/libraries/TransientStateLibrary.sol";
 
 import {ScoringOracle} from "./ScoringOracle.sol";
 import {IScoreTaskCreator} from "./IScoreTaskCreator.sol";
@@ -32,9 +35,20 @@ import {IScoreTaskCreator} from "./IScoreTaskCreator.sol";
 /// BLS integration: on-chain detection auto-triggers scoring tasks on the
 /// TaskManager. The BLS operator quorum evaluates flagged addresses, and
 /// quorum-verified scores feed back into fee decisions on subsequent swaps.
-contract GradientShieldHook is BaseHook {
+///
+/// hookData attestation (optional): swappers can pass a signed score
+/// attestation via hookData to skip the on-chain oracle SLOAD (~2,600 gas
+/// saved). The attestor signs (sender, score, expiry, chainId, hookAddress)
+/// off-chain; the hook verifies the ECDSA signature and uses the attested
+/// score. Falls back to on-chain oracle when hookData is empty, the
+/// attestor is not set, the signature is invalid, or the attestation expired.
+contract GradientShieldHook is BaseHook, IUnlockCallback {
+    // BaseHook provides onlyPoolManager modifier via ImmutableState.
+    // IUnlockCallback provides the unlockCallback interface for multi-hop routing.
     using PoolIdLibrary for PoolKey;
     using LPFeeLibrary for uint24;
+    using CurrencyLibrary for Currency;
+    using TransientStateLibrary for IPoolManager;
 
     // ---------------------------------------------------------------------
     // Config
@@ -65,6 +79,7 @@ contract GradientShieldHook is BaseHook {
 
     ScoringOracle public immutable oracle;
     IScoreTaskCreator public immutable taskManager;
+    address public immutable attestor;
 
     mapping(address => uint256) internal _lastTaskBlock;
 
@@ -93,6 +108,7 @@ contract GradientShieldHook is BaseHook {
     // ---------------------------------------------------------------------
 
     error BotRejected(address swapper, uint16 score);
+    error DeadlineExpired();
 
     // ---------------------------------------------------------------------
     // Constructor
@@ -101,10 +117,98 @@ contract GradientShieldHook is BaseHook {
     constructor(
         IPoolManager _poolManager,
         ScoringOracle _oracle,
-        IScoreTaskCreator _taskManager
+        IScoreTaskCreator _taskManager,
+        address _attestor
     ) BaseHook(_poolManager) {
         oracle = _oracle;
         taskManager = _taskManager;
+        attestor = _attestor;
+    }
+
+    // ---------------------------------------------------------------------
+    // Multi-hop router (unlockCallback settlement)
+    // ---------------------------------------------------------------------
+
+    struct SwapHop {
+        PoolKey key;
+        bool zeroForOne;
+        int256 amountSpecified;
+        uint160 sqrtPriceLimitX96;
+        bytes hookData;
+    }
+
+    struct MultiHopParams {
+        SwapHop[] hops;
+        Currency[] currencies;
+        address sender;
+        uint256 deadline;
+    }
+
+    event MultiHopExecuted(address indexed sender, uint256 hops);
+
+    /// @notice Execute multiple swaps in a single unlock context. Intermediate
+    ///         token balances cancel out inside the PoolManager's internal
+    ///         accounting — only the net input and output are settled via
+    ///         ERC6909 claim tokens (burn for debits, mint for credits).
+    ///         No ERC-20 transferFrom calls, no approvals to the hook.
+    /// @dev    Caller must hold sufficient ERC6909 claim balances on the
+    ///         PoolManager for each input currency (obtained via
+    ///         poolManager.settle + poolManager.mint beforehand) and must
+    ///         have approved this hook as an ERC6909 operator on the
+    ///         PoolManager (poolManager.setOperator(hook, true)).
+    /// @param hops       Ordered swap legs (A→B, B→C, …).
+    /// @param currencies All unique currencies touched by the hops (used for
+    ///                   settlement after the swaps execute).
+    /// @param deadline   Revert if block.timestamp exceeds this.
+    function multiHopSwap(
+        SwapHop[] calldata hops,
+        Currency[] calldata currencies,
+        uint256 deadline
+    ) external {
+        if (block.timestamp > deadline) revert DeadlineExpired();
+
+        bytes memory data = abi.encode(MultiHopParams({
+            hops: hops,
+            currencies: currencies,
+            sender: msg.sender,
+            deadline: deadline
+        }));
+        poolManager.unlock(data);
+
+        emit MultiHopExecuted(msg.sender, hops.length);
+    }
+
+    function unlockCallback(bytes calldata data) external onlyPoolManager returns (bytes memory) {
+        MultiHopParams memory params = abi.decode(data, (MultiHopParams));
+
+        for (uint256 i = 0; i < params.hops.length; i++) {
+            poolManager.swap(params.hops[i].key, SwapParams({
+                zeroForOne: params.hops[i].zeroForOne,
+                amountSpecified: params.hops[i].amountSpecified,
+                sqrtPriceLimitX96: params.hops[i].sqrtPriceLimitX96
+            }), params.hops[i].hookData);
+        }
+
+        for (uint256 i = 0; i < params.currencies.length; i++) {
+            _settleCurrencyERC6909(params.currencies[i], params.sender);
+        }
+
+        return "";
+    }
+
+    /// @dev Settles a currency delta using ERC6909 claims on the PoolManager.
+    ///      Negative delta (hook owes tokens) → burn claims from sender.
+    ///      Positive delta (hook is owed tokens) → mint claims to sender.
+    ///      No ERC-20 transfers — purely internal PoolManager accounting.
+    function _settleCurrencyERC6909(Currency currency, address sender) internal {
+        int256 delta = poolManager.currencyDelta(address(this), currency);
+
+        if (delta < 0) {
+            uint256 amount = uint256(-delta);
+            poolManager.burn(sender, currency.toId(), amount);
+        } else if (delta > 0) {
+            poolManager.mint(sender, currency.toId(), uint256(delta));
+        }
     }
 
     // ---------------------------------------------------------------------
@@ -134,13 +238,13 @@ contract GradientShieldHook is BaseHook {
     // beforeSwap
     // ---------------------------------------------------------------------
 
-    function _beforeSwap(address sender, PoolKey calldata key, SwapParams calldata params, bytes calldata)
+    function _beforeSwap(address sender, PoolKey calldata key, SwapParams calldata params, bytes calldata hookData)
         internal
         override
         returns (bytes4, BeforeSwapDelta, uint24)
     {
         PoolId poolId = key.toId();
-        uint16 score = oracle.getScore(sender);
+        uint16 score = _resolveScore(sender, hookData);
 
         if (score >= REJECT_THRESHOLD) {
             emit BotRejectedEvent(poolId, sender, score);
@@ -187,6 +291,35 @@ contract GradientShieldHook is BaseHook {
         uint24 range = uint24(REJECT_THRESHOLD - SUSPICIOUS_THRESHOLD);
         uint24 position = uint24(score - SUSPICIOUS_THRESHOLD);
         return BASE_FEE + (MAX_ESCALATED_FEE - BASE_FEE) * position / range;
+    }
+
+    // ---------------------------------------------------------------------
+    // Score resolution (hookData attestation or on-chain oracle fallback)
+    // ---------------------------------------------------------------------
+
+    function _resolveScore(address sender, bytes calldata hookData) internal view returns (uint16) {
+        if (hookData.length == 0 || attestor == address(0)) {
+            return oracle.getScore(sender);
+        }
+
+        if (hookData.length != 160) return oracle.getScore(sender);
+
+        (uint16 score, uint64 expiry, uint8 v, bytes32 r, bytes32 s) =
+            abi.decode(hookData, (uint16, uint64, uint8, bytes32, bytes32));
+
+        if (block.timestamp > expiry) return oracle.getScore(sender);
+
+        bytes32 digest = keccak256(
+            abi.encodePacked(
+                "\x19Ethereum Signed Message:\n32",
+                keccak256(abi.encodePacked(sender, score, expiry, block.chainid, address(this)))
+            )
+        );
+
+        address recovered = ecrecover(digest, v, r, s);
+        if (recovered != attestor) return oracle.getScore(sender);
+
+        return score;
     }
 
     // ---------------------------------------------------------------------

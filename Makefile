@@ -6,23 +6,44 @@
 export
 
 .DEFAULT_GOAL := help
-.PHONY: help install build test test-verbose sim demo fmt fmt-check clean deploy snapshot
+.PHONY: help install build test test-verbose sim demo fmt fmt-check clean deploy deploy-sepolia snapshot operator create-task score sizes mine-hook
 
 ## help: list available targets
 help:
 	@echo "GradientShield make targets:"
 	@grep -E '^## ' $(MAKEFILE_LIST) | sed 's/## /  /'
 
-## install: fetch dependencies (forge-std, v4-core, v4-periphery) at pinned revs
+# ───────────────────────────────────────────────────────
+# Setup
+# ───────────────────────────────────────────────────────
+
+## install: fetch all dependencies (forge libs + operator npm packages)
 install:
 	git submodule update --init --recursive
 	forge install
+	cd operator && npm install
+
+# ───────────────────────────────────────────────────────
+# Build
+# ───────────────────────────────────────────────────────
 
 ## build: compile all contracts
 build:
 	forge build
 
-## test: run the full test suite
+## clean: remove build artifacts (out/, cache/)
+clean:
+	forge clean
+
+## sizes: print contract sizes (useful to check 24 KB limit)
+sizes:
+	forge build --sizes
+
+# ───────────────────────────────────────────────────────
+# Test
+# ───────────────────────────────────────────────────────
+
+## test: run the full test suite (52 tests across 6 suites)
 test:
 	forge test -vvv
 
@@ -38,6 +59,14 @@ sim:
 demo:
 	forge test --match-path test/DemoSimulation.t.sol -vvv
 
+## snapshot: write a gas snapshot (.gas-snapshot)
+snapshot:
+	forge snapshot
+
+# ───────────────────────────────────────────────────────
+# Formatting
+# ───────────────────────────────────────────────────────
+
 ## fmt: format Solidity sources in place
 fmt:
 	forge fmt
@@ -46,17 +75,40 @@ fmt:
 fmt-check:
 	forge fmt --check
 
-## snapshot: write a gas snapshot (.gas-snapshot)
-snapshot:
-	forge snapshot
+# ───────────────────────────────────────────────────────
+# Deploy
+# ───────────────────────────────────────────────────────
 
-## clean: remove build artifacts (out/, cache/)
-clean:
-	forge clean
+## mine-hook: mine the CREATE2 hook address (needs POOL_MANAGER; optional ORACLE, TASK_MANAGER)
+mine-hook:
+	@test -n "$(POOL_MANAGER)" || (echo "error: POOL_MANAGER is not set" && exit 1)
+	forge script script/MineHookAddress.s.sol
 
-## deploy: deploy to a testnet (needs POOL_MANAGER, PRIVATE_KEY, RPC_URL in env/.env)
+## deploy: deploy full stack to a testnet (needs POOL_MANAGER, PRIVATE_KEY, RPC_URL)
 deploy:
 	@test -n "$(POOL_MANAGER)" || (echo "error: POOL_MANAGER is not set" && exit 1)
 	@test -n "$(PRIVATE_KEY)"  || (echo "error: PRIVATE_KEY is not set"  && exit 1)
 	@test -n "$(RPC_URL)"      || (echo "error: RPC_URL is not set"      && exit 1)
 	forge script script/Deploy.s.sol --rpc-url $(RPC_URL) --private-key $(PRIVATE_KEY) --broadcast
+
+## deploy-sepolia: deploy AVS (oracle + TaskManager + ServiceManager) to Sepolia
+deploy-sepolia:
+	@test -n "$(PRIVATE_KEY)" || (echo "error: PRIVATE_KEY is not set" && exit 1)
+	@test -n "$(RPC_URL)"     || (echo "error: RPC_URL is not set"     && exit 1)
+	forge script script/DeploySepolia.s.sol --rpc-url $(RPC_URL) --private-key $(PRIVATE_KEY) --broadcast
+
+# ───────────────────────────────────────────────────────
+# Operator (off-chain AVS node)
+# ───────────────────────────────────────────────────────
+
+## operator: start the off-chain AVS operator (watches for score tasks)
+operator:
+	cd operator && npm run operator
+
+## create-task: manually create a scoring task via the operator CLI
+create-task:
+	cd operator && npm run create-task
+
+## score: look up a live score from the deployed oracle
+score:
+	cd operator && npm run score

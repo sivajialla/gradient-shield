@@ -12,6 +12,9 @@ broadcast/**/dry-run/
 *.pem
 *.key
 
+# Node
+node_modules/
+
 # OS / editor
 .DS_Store
 .vscode/
