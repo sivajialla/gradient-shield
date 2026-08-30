@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useAccount, useConnect, useDisconnect } from 'wagmi';
 import { injected } from 'wagmi/connectors';
 import Header from './components/Header';
@@ -16,6 +16,25 @@ function App() {
   const { disconnect } = useDisconnect();
   const [activeTab, setActiveTab] = useState<'dashboard' | 'swap' | 'tasks'>('dashboard');
 
+  const getInitialTheme = (): 'dark' | 'light' => {
+    try {
+      const saved = localStorage.getItem('gs-theme');
+      if (saved === 'light' || saved === 'dark') return saved;
+    } catch {}
+    return 'dark';
+  };
+
+  const [theme, setTheme] = useState<'dark' | 'light'>(getInitialTheme);
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    try { localStorage.setItem('gs-theme', theme); } catch {}
+  }, [theme]);
+
+  const toggleTheme = useCallback(() => {
+    setTheme(prev => prev === 'dark' ? 'light' : 'dark');
+  }, []);
+
   const handleConnect = () => {
     connect({ connector: injected() });
   };
@@ -27,6 +46,8 @@ function App() {
         isConnected={isConnected}
         onConnect={handleConnect}
         onDisconnect={disconnect}
+        theme={theme}
+        onToggleTheme={toggleTheme}
       />
 
       <nav className="tab-nav">

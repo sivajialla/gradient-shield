@@ -21,10 +21,7 @@ export default function FeeCurve() {
 
   return (
     <div className="card fee-curve">
-      <div className="card-title">
-        <span className="icon">&#128200;</span>
-        Continuous Fee Curve
-      </div>
+      <div className="card-title">Continuous Fee Curve</div>
 
       <div className="fee-legend">
         <div className="legend-item">
@@ -52,26 +49,26 @@ export default function FeeCurve() {
                 <stop offset="80%" stopColor="#f97316" />
               </linearGradient>
               <linearGradient id="feeAreaGradient" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor="#3b82f6" stopOpacity={0.3} />
-                <stop offset="100%" stopColor="#3b82f6" stopOpacity={0} />
+                <stop offset="0%" stopColor="#FC72FF" stopOpacity={0.3} />
+                <stop offset="100%" stopColor="#FC72FF" stopOpacity={0} />
               </linearGradient>
             </defs>
-            <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+            <CartesianGrid strokeDasharray="3 3" stroke="var(--chart-grid)" />
             <XAxis
               dataKey="score"
-              stroke="#64748b"
+              stroke="var(--text-muted)"
               fontSize={11}
-              label={{ value: 'MEV Risk Score', position: 'insideBottom', offset: -2, fill: '#64748b', fontSize: 11 }}
+              label={{ value: 'MEV Risk Score', position: 'insideBottom', offset: -2, fill: 'var(--text-muted)', fontSize: 11 }}
             />
             <YAxis
-              stroke="#64748b"
+              stroke="var(--text-muted)"
               fontSize={11}
               tickFormatter={(v) => `${v}%`}
               domain={[0, 2]}
             />
             <Tooltip
-              contentStyle={{ background: '#1a2236', border: '1px solid #2a3650', borderRadius: '8px', fontSize: '13px' }}
-              labelStyle={{ color: '#94a3b8' }}
+              contentStyle={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: '8px', fontSize: '13px', color: 'var(--text-primary)' }}
+              labelStyle={{ color: 'var(--text-secondary)' }}
               formatter={((value: number | string | undefined, name: string) => {
                 if (name === 'rejected') return ['REVERTED', 'Status'];
                 return typeof value === 'number' ? [`${value.toFixed(2)}%`, 'Fee'] : ['N/A', 'Fee'];

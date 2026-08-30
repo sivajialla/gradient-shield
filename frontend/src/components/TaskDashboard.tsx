@@ -63,10 +63,7 @@ export default function TaskDashboard() {
       </div>
 
       <div className="card">
-        <div className="card-title">
-          <span className="icon">&#128203;</span>
-          BLS Scoring Tasks
-        </div>
+        <div className="card-title">BLS Scoring Tasks</div>
 
         <div className="task-table-wrap">
           <table className="task-table">
@@ -116,10 +113,7 @@ export default function TaskDashboard() {
       </div>
 
       <div className="card">
-        <div className="card-title">
-          <span className="icon">&#128279;</span>
-          BLS Quorum Flow
-        </div>
+        <div className="card-title">BLS Quorum Flow</div>
         <div className="quorum-flow">
           <div className="flow-step">
             <div className="flow-circle">1</div>

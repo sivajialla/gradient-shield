@@ -3,10 +3,7 @@ import './ArchitectureDiagram.css';
 export default function ArchitectureDiagram() {
   return (
     <div className="card architecture">
-      <div className="card-title">
-        <span className="icon">&#127959;</span>
-        Architecture
-      </div>
+      <div className="card-title">Architecture</div>
 
       <div className="arch-diagram">
         <div className="arch-section on-chain">

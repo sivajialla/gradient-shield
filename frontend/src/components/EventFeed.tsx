@@ -85,7 +85,6 @@ export default function EventFeed() {
     <div className="card event-feed">
       <div className="event-feed-header">
         <div className="card-title">
-          <span className="icon">&#9889;</span>
           Live Event Feed
           <span className="live-dot" />
         </div>

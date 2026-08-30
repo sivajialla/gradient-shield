@@ -74,7 +74,7 @@
 
 .event-table td {
   padding: 10px 12px;
-  border-bottom: 1px solid rgba(42, 54, 80, 0.5);
+  border-bottom: 1px solid var(--border);
   color: var(--text-secondary);
 }
 

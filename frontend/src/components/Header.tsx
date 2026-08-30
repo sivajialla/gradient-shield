@@ -5,22 +5,31 @@ interface HeaderProps {
   isConnected: boolean;
   onConnect: () => void;
   onDisconnect: () => void;
+  theme: 'dark' | 'light';
+  onToggleTheme: () => void;
 }
 
-export default function Header({ address, isConnected, onConnect, onDisconnect }: HeaderProps) {
+export default function Header({ address, isConnected, onConnect, onDisconnect, theme, onToggleTheme }: HeaderProps) {
   const truncate = (addr: string) => `${addr.slice(0, 6)}...${addr.slice(-4)}`;
 
   return (
     <header className="header">
       <div className="header-left">
         <div className="logo">
-          <span className="logo-icon">&#9632;</span>
           <span className="logo-text">GradientShield</span>
         </div>
         <span className="network-badge">Sepolia</span>
       </div>
 
       <div className="header-right">
+        <button
+          className="theme-toggle"
+          onClick={onToggleTheme}
+          aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
+          title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
+        >
+          {theme === 'dark' ? '☀️' : '🌙'}
+        </button>
         {isConnected && address ? (
           <div className="wallet-info">
             <span className="wallet-dot" />

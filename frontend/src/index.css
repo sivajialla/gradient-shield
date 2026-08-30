@@ -1,25 +1,55 @@
 :root {
-  --bg-primary: #0a0e17;
-  --bg-secondary: #111827;
-  --bg-card: #1a2236;
-  --bg-card-hover: #1f2a42;
-  --bg-input: #0d1321;
-  --border: #2a3650;
-  --border-focus: #3b82f6;
-  --text-primary: #f1f5f9;
-  --text-secondary: #94a3b8;
-  --text-muted: #64748b;
-  --accent: #3b82f6;
-  --accent-hover: #2563eb;
-  --green: #22c55e;
-  --green-bg: rgba(34, 197, 94, 0.1);
-  --yellow: #eab308;
-  --yellow-bg: rgba(234, 179, 8, 0.1);
-  --red: #ef4444;
-  --red-bg: rgba(239, 68, 68, 0.1);
-  --orange: #f97316;
-  --purple: #a855f7;
-  --gradient-shield: linear-gradient(135deg, #3b82f6, #8b5cf6, #ec4899);
+  --bg-primary: #131313;
+  --bg-secondary: #1B1B1B;
+  --bg-card: #1B1B1B;
+  --bg-card-hover: #252525;
+  --bg-input: #131313;
+  --border: #303030;
+  --border-focus: #FC72FF;
+  --text-primary: #FFFFFF;
+  --text-secondary: #9B9B9B;
+  --text-muted: #5E5E5E;
+  --accent: #FC72FF;
+  --accent-hover: #e85beb;
+  --accent-soft: rgba(252, 114, 255, 0.12);
+  --green: #40B66B;
+  --green-bg: rgba(64, 182, 107, 0.12);
+  --yellow: #F6B100;
+  --yellow-bg: rgba(246, 177, 0, 0.12);
+  --red: #FF5F52;
+  --red-bg: rgba(255, 95, 82, 0.12);
+  --orange: #FF8934;
+  --chart-grid: #303030;
+  --gauge-track: #303030;
+  --shadow: none;
+  --font-heading: 'Space Grotesk', 'Inter', sans-serif;
+}
+
+[data-theme="light"] {
+  --bg-primary: #F9F9F9;
+  --bg-secondary: #FFFFFF;
+  --bg-card: #FFFFFF;
+  --bg-card-hover: #F2F2F2;
+  --bg-input: #F2F2F2;
+  --border: #E8E8E8;
+  --border-focus: #FC72FF;
+  --text-primary: #222222;
+  --text-secondary: #7D7D7D;
+  --text-muted: #CECECE;
+  --accent: #FC72FF;
+  --accent-hover: #e85beb;
+  --accent-soft: rgba(252, 114, 255, 0.08);
+  --green: #21A55A;
+  --green-bg: rgba(33, 165, 90, 0.1);
+  --yellow: #D9A000;
+  --yellow-bg: rgba(217, 160, 0, 0.1);
+  --red: #E5453D;
+  --red-bg: rgba(229, 69, 61, 0.1);
+  --orange: #E57520;
+  --chart-grid: #E8E8E8;
+  --gauge-track: #E8E8E8;
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+  --font-heading: 'Space Grotesk', 'Inter', sans-serif;
 }
 
 * {

@@ -62,10 +62,7 @@ export default function ScoreLookup({ connectedAddress }: Props) {
 
   return (
     <div className="card score-lookup">
-      <div className="card-title">
-        <span className="icon">&#128270;</span>
-        Score Lookup
-      </div>
+      <div className="card-title">Score Lookup</div>
 
       <div className="input-group">
         <input
@@ -99,7 +96,7 @@ export default function ScoreLookup({ connectedAddress }: Props) {
       <div className="score-display">
         <div className="score-gauge">
           <svg viewBox="0 0 120 120" className="gauge-svg">
-            <circle cx="60" cy="60" r="50" fill="none" stroke="#1e293b" strokeWidth="10" />
+            <circle cx="60" cy="60" r="50" fill="none" stroke="var(--gauge-track)" strokeWidth="10" />
             <circle
               cx="60" cy="60" r="50"
               fill="none"
@@ -113,7 +110,7 @@ export default function ScoreLookup({ connectedAddress }: Props) {
             <text x="60" y="55" textAnchor="middle" fill={displayBand.color} fontSize="28" fontWeight="700">
               {displayScore}
             </text>
-            <text x="60" y="75" textAnchor="middle" fill="#94a3b8" fontSize="11">
+            <text x="60" y="75" textAnchor="middle" fill="var(--text-secondary)" fontSize="11">
               {displayBand.label}
             </text>
           </svg>
