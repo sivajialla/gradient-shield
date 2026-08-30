@@ -64,10 +64,24 @@ contract GradientShieldHook is BaseHook, IUnlockCallback {
     uint256 public constant TASK_COOLDOWN_BLOCKS = 50;
     uint256 public constant STALENESS_THRESHOLD = 7 days;
 
+    // Price impact guard: cumulative abs(amountSpecified) per pool per block.
+    // When total volume exceeds this, subsequent swaps pay escalated fees,
+    // making the back-run leg of a sandwich unprofitable.
+    uint256 public constant POOL_IMPACT_THRESHOLD = 10 ether;
+
+    // Per-sender impact cap: max abs(amountSpecified) any single sender can
+    // push through a pool in one block. Prevents large front-runs.
+    uint256 public constant SENDER_IMPACT_CAP = 5 ether;
+
+    // Penalty fee applied when impact guards trigger (1.50% = 15000 pips).
+    uint24 public constant IMPACT_PENALTY_FEE = 15000;
+
     // Transient storage namespace seeds (prevent slot collisions).
     bytes32 private constant _FIRST_SWAP_NS = keccak256("GradientShield.firstSwap");
     bytes32 private constant _BLOCK_SWAPS_NS = keccak256("GradientShield.blockSwaps");
     bytes32 private constant _LIQUIDITY_NS = keccak256("GradientShield.liquidityAdds");
+    bytes32 private constant _POOL_IMPACT_NS = keccak256("GradientShield.poolImpact");
+    bytes32 private constant _SENDER_IMPACT_NS = keccak256("GradientShield.senderImpact");
 
     // Transient storage sentinel values for first-swap direction.
     uint256 private constant _SWAP_ZERO_FOR_ONE = 1;
@@ -82,6 +96,7 @@ contract GradientShieldHook is BaseHook, IUnlockCallback {
     address public immutable attestor;
 
     mapping(address => uint256) internal _lastTaskBlock;
+    mapping(address => bool) internal _pendingScoreFlag;
 
     // ---------------------------------------------------------------------
     // Events
@@ -102,12 +117,15 @@ contract GradientShieldHook is BaseHook, IUnlockCallback {
     event FeeEscalated(PoolId indexed poolId, address indexed swapper, uint24 baseFee, uint24 chargedFee);
     event BotRejectedEvent(PoolId indexed poolId, address indexed swapper, uint16 score);
     event ScoreTaskTriggered(address indexed subject, uint256 blockNumber, string detectionType);
+    event PoolImpactGuard(PoolId indexed poolId, address indexed sender, uint256 cumulativeImpact, uint24 penaltyFee);
+    event SenderImpactCapped(PoolId indexed poolId, address indexed sender, uint256 senderImpact, uint24 penaltyFee);
 
     // ---------------------------------------------------------------------
     // Errors
     // ---------------------------------------------------------------------
 
     error BotRejected(address swapper, uint16 score);
+    error SenderImpactExceeded(address sender, uint256 impact, uint256 cap);
     error DeadlineExpired();
 
     // ---------------------------------------------------------------------
@@ -256,6 +274,15 @@ contract GradientShieldHook is BaseHook, IUnlockCallback {
         _detectSandwich(poolId, sender, params.zeroForOne);
 
         uint24 fee = _computeFee(score);
+
+        // --- Price impact guards (approaches 2 + 5) ---
+        uint256 swapSize = params.amountSpecified > 0
+            ? uint256(params.amountSpecified)
+            : uint256(-params.amountSpecified);
+
+        uint24 impactFee = _applyImpactGuards(poolId, sender, swapSize);
+        if (impactFee > fee) fee = impactFee;
+
         if (fee > BASE_FEE) emit FeeEscalated(poolId, sender, BASE_FEE, fee);
 
         emit SwapTelemetry(poolId, sender, params.zeroForOne, params.amountSpecified, score, fee, block.number);
@@ -279,6 +306,55 @@ contract GradientShieldHook is BaseHook, IUnlockCallback {
         }
 
         _tstore(counterSlot, swapCount + 1);
+    }
+
+    // ---------------------------------------------------------------------
+    // Price impact guards
+    // ---------------------------------------------------------------------
+
+    function _applyImpactGuards(PoolId poolId, address sender, uint256 swapSize) internal returns (uint24) {
+        uint24 fee = BASE_FEE;
+
+        // Check if this sender was flagged from a previous block's high-volume
+        // activity. If so, trigger a scoring task now (this swap succeeds,
+        // so the task persists).
+        if (_pendingScoreFlag[sender]) {
+            _pendingScoreFlag[sender] = false;
+            _triggerScoreTask(sender, "impact_cap_prior");
+        }
+
+        // Guard 5: Per-sender impact cap — revert if one sender pushes too
+        // much volume through a single pool in one block.
+        bytes32 senderSlot = _senderImpactSlot(poolId, sender);
+        uint256 senderCumulative = _tload(senderSlot) + swapSize;
+        if (senderCumulative > SENDER_IMPACT_CAP) {
+            emit SenderImpactCapped(poolId, sender, senderCumulative, IMPACT_PENALTY_FEE);
+            revert SenderImpactExceeded(sender, senderCumulative, SENDER_IMPACT_CAP);
+        }
+        _tstore(senderSlot, senderCumulative);
+
+        // Flag sender for scoring if they're using a high proportion of the
+        // cap in this block. This write persists even though the back-run
+        // might revert — because it's written on the SUCCESSFUL front-run,
+        // not the failed back-run. The scoring task triggers on their next
+        // successful swap.
+        if (senderCumulative > SENDER_IMPACT_CAP / 2) {
+            _pendingScoreFlag[sender] = true;
+        }
+
+        // Guard 2: Pool-level price impact — if cumulative volume this block
+        // exceeds the threshold, escalate the fee. This makes the back-run
+        // leg of a sandwich expensive.
+        bytes32 poolSlot = _poolImpactSlot(poolId);
+        uint256 poolCumulative = _tload(poolSlot) + swapSize;
+        _tstore(poolSlot, poolCumulative);
+
+        if (poolCumulative > POOL_IMPACT_THRESHOLD) {
+            fee = IMPACT_PENALTY_FEE;
+            emit PoolImpactGuard(poolId, sender, poolCumulative, fee);
+        }
+
+        return fee;
     }
 
     // ---------------------------------------------------------------------
@@ -409,5 +485,13 @@ contract GradientShieldHook is BaseHook, IUnlockCallback {
 
     function _liquiditySlot(PoolId poolId, address sender) internal view returns (bytes32) {
         return keccak256(abi.encode(_LIQUIDITY_NS, poolId, sender, block.number));
+    }
+
+    function _poolImpactSlot(PoolId poolId) internal view returns (bytes32) {
+        return keccak256(abi.encode(_POOL_IMPACT_NS, poolId, block.number));
+    }
+
+    function _senderImpactSlot(PoolId poolId, address sender) internal view returns (bytes32) {
+        return keccak256(abi.encode(_SENDER_IMPACT_NS, poolId, sender, block.number));
     }
 }

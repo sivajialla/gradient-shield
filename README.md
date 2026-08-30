@@ -3,48 +3,64 @@
 A Uniswap v4 hook that prices swaps by the swapper's MEV-risk score, enforced by
 a BLS multi-operator quorum through an EigenLayer AVS. Suspicious swappers pay an
 escalated fee via a continuous fee curve; confirmed toxic flow is rejected outright.
-On-chain sandwich and JIT detection use **transient storage (EIP-1153)** for
-gas-efficient per-block tracking (~25% gas savings on detection logic).
+
+Five defense layers work together to prevent MEV — including **same-block impact
+guards** that make sandwich attacks expensive on the very first trade, before any
+score exists.
 
 # Project Number : HK-UHI10-1050
 
-> **60 tests passing, 0 skipped** across 8 test suites. Hook logic, BLS task
-> manager, oracle decay, sandwich/JIT detection, hookData attestation,
-> multi-hop ERC6909 settlement, and the full escalation flow are implemented
-> and tested.
+> **200 tests passing, 0 skipped** across 16 test suites. Hook logic, BLS task
+> manager, oracle decay, sandwich/JIT detection, impact guards, hookData
+> attestation, multi-hop ERC6909 settlement, access control, edge cases,
+> and the full escalation flow are implemented and tested.
 
 ---
 
-## How GradientShield works
+## Five defense layers
 
-Instead of a binary allow/deny, the hook maps a continuous **0-100 risk score**
-onto a **continuous fee curve** — clean flow pays the base fee, suspicious flow
-pays a linearly escalating fee (up to 5x), and confirmed toxic flow is rejected
-outright. The name is the mechanism: a *gradient* that *shields* the pool.
+GradientShield doesn't rely on a single mechanism. Five layers work together so
+that even a brand-new address attempting its first sandwich attack is caught and
+penalized:
 
-Three systems work together:
+| Layer | When it acts | What it does |
+|:-----:|:------------:|--------------|
+| **1. Sender Impact Cap** | Same block (first trade) | Limits any single sender to **5 ETH** of volume per pool per block. The back-run leg of a sandwich reverts with `SenderImpactExceeded` when cumulative volume exceeds the cap. |
+| **2. Pool Impact Guard** | Same block (first trade) | Tracks cumulative volume across all senders per pool per block. When total volume exceeds **10 ETH**, subsequent swaps pay a **1.50% penalty fee**, making the back-run unprofitable. |
+| **3. Sandwich/JIT Detection** | Same block | Uses **transient storage (EIP-1153)** to detect same-block buy→victim→sell patterns and same-block add→swap→remove JIT liquidity. Emits detection events and auto-triggers AVS scoring tasks. |
+| **4. Continuous Fee Curve** | Every swap | Maps the sender's **0-100 risk score** onto a fee: clean (0-39) pays 0.30%, suspicious (40-79) pays up to 1.50%, confirmed toxic (80+) is rejected outright. |
+| **5. AVS Scoring (BLS Quorum)** | Asynchronous | EigenLayer operators read on-chain detection events, compute scores independently, reach BLS consensus, and write the verified score to the oracle — affecting all future swaps. |
 
-1. **On-chain hook (BLS-integrated):** `GradientShieldHook` runs inside the
-   PoolManager's `beforeSwap` callback. It reads scores from the
-   `ScoringOracle` (or accepts off-chain ECDSA-signed attestations via
-   `hookData`), makes a fee decision, detects sandwich/JIT patterns, and
-   **auto-triggers BLS scoring tasks** on the `TaskManager` when patterns
-   are detected — closing the detection→quorum→scoring feedback loop on-chain.
-   Multi-hop swaps are routed via `unlockCallback` with **ERC6909 claim
-   settlement** (no ERC-20 approvals to the hook, no reentrancy risk).
+**Key insight:** Layers 1-3 act on the *first ever* trade. No reputation history
+needed. Layer 4-5 build long-term memory so repeat offenders face escalating
+fees and eventual rejection.
 
-2. **On-chain BLS task manager (consensus):** `GradientShieldTaskManager` accepts
-   scoring tasks from both the off-chain generator **and the hook itself**,
-   then verifies BLS-aggregated signatures from the operator quorum via
-   `BLSSignatureChecker`. A 100-block challenge window allows disputes before
-   a score becomes final.
+---
 
-3. **Off-chain (the feedback loop):** EigenLayer AVS operators index the emitted
-   `SwapTelemetry` and `ScoreTaskTriggered` events, independently compute
-   MEV/sandwich scores, reach BLS consensus off-chain, and the aggregator
-   submits the verified score to the oracle.
+## How the first sandwich attack is stopped
 
-### Architecture & data flow
+```
+Block N:
+  1. Bot front-runs: buys 4 ETH of token → cumulative = 4 ETH
+     Hook sets _pendingScoreFlag (4 ETH > 50% of 5 ETH cap)
+  2. Victim swaps: normal trade proceeds at base fee
+  3. Bot back-runs: tries to sell 4 ETH → cumulative = 8 ETH > 5 ETH cap
+     → REVERTS with SenderImpactExceeded
+
+Block N+1:
+  4. Bot tries any swap → hook sees _pendingScoreFlag is set
+     → auto-triggers AVS scoring task (ScoreTaskTriggered)
+  5. AVS operators read SenderImpactCapped event → score +30-35
+     Bot enters suspicious band, pays escalated fees going forward
+```
+
+The sandwich is **physically impossible** — the back-run reverts. No score
+history, no oracle lookup, no off-chain delay. The cap is enforced by transient
+storage at ~100 gas per read/write.
+
+---
+
+## Architecture & data flow
 
 ```mermaid
 flowchart LR
@@ -54,15 +70,18 @@ flowchart LR
         C -->|"getScore()"| D[ScoringOracle]
         D -->|"uint16"| C
 
-        C --> E{Score?}
-        E -->|"0-39"| F["Base fee\n0.30%"]
-        E -->|"40-79"| G["Continuous curve\n0.30% → 1.50%"]
-        E -->|"80-100"| H["Rejected\nBotRejected"]
+        C --> E{Defense layers}
+        E -->|"Impact cap\nexceeded"| X["REVERT\nSenderImpactExceeded"]
+        E -->|"Score 80+"| H["REVERT\nBotRejected"]
+        E -->|"Score 0-39"| F["Base fee\n0.30%"]
+        E -->|"Score 40-79"| G["Escalated fee\n0.30% → 1.50%"]
+        E -->|"Pool impact\nexceeded"| PI["Penalty fee\n1.50%"]
 
         F --> I[SwapTelemetry]
         G --> I
+        PI --> I
 
-        C -->|"sandwich/JIT\ndetected"| TM
+        C -->|"sandwich/JIT/\nimpact detected"| TM
         TM["GradientShieldTaskManager\nBLS quorum verification"] -->|"setScore()"| D
         SM["GradientShieldServiceManager\nAVS identity layer"] --- TM
     end
@@ -79,8 +98,6 @@ flowchart LR
 
 ### What happens when a user submits a trade
 
-Every swap through a GradientShield-protected pool follows this path:
-
 ```mermaid
 sequenceDiagram
     participant User
@@ -89,9 +106,8 @@ sequenceDiagram
     participant Oracle as ScoringOracle
     participant TM as TaskManager
     participant Ops as BLS Operators
-    participant Agg as Aggregator
 
-    Note over User,Agg: SYNCHRONOUS — same transaction
+    Note over User,Ops: SYNCHRONOUS — same transaction
 
     User->>PM: swap()
     PM->>Hook: beforeSwap(sender, key, params)
@@ -101,158 +117,149 @@ sequenceDiagram
 
     alt score >= 80
         Hook--xPM: revert BotRejected
-        Note right of Hook: Swap blocked
     end
 
     alt score > 0 AND lastUpdated > 7 days
         Hook->>TM: createScoreTask(sender, "stale")
-        Note right of Hook: Stale re-evaluation
     end
 
-    Note over Hook: Sandwich detection
+    Note over Hook: Sandwich detection (transient storage)
     alt opposite-direction swap + victim in same block
         Hook->>Hook: emit SandwichDetected
         Hook->>TM: createScoreTask(sender, "sandwich")
     end
 
     Hook->>Hook: _computeFee(score)
-    Note right of Hook: Continuous curve<br/>score 0-39 → 3000 pips<br/>score 40-79 → 3000-15000 pips
+
+    Note over Hook: Impact guards (transient storage)
+    alt _pendingScoreFlag set from prior block
+        Hook->>TM: createScoreTask(sender, "impact")
+    end
+    alt sender cumulative > SENDER_IMPACT_CAP
+        Hook--xPM: revert SenderImpactExceeded
+    end
+    alt pool cumulative > POOL_IMPACT_THRESHOLD
+        Hook->>Hook: penaltyFee = max(scoreFee, 15000)
+        Hook->>Hook: emit PoolImpactGuard
+    end
 
     Hook-->>PM: (fee | OVERRIDE_FEE_FLAG)
     PM-->>User: Swap executes at computed fee
 
     Hook->>Hook: emit SwapTelemetry
 
-    Note over User,Agg: ASYNCHRONOUS — off-chain BLS consensus
+    Note over User,Ops: ASYNCHRONOUS — off-chain BLS consensus
 
-    Ops->>Ops: Index SwapTelemetry +<br/>ScoreTaskTriggered events
-    Ops->>Ops: Each operator computes<br/>score independently
-    Ops->>Agg: BLS partial signatures
-
-    Agg->>TM: respondToScoreTask(task, response, aggregatedBLSSig)
-    TM->>TM: BLSSignatureChecker verifies<br/>(BN254 pairing check, ~120k gas)
-
-    alt quorum threshold met (≥67%)
-        TM->>Oracle: setScore(subject, newScore)
-        Note over Oracle: Score updated — affects<br/>all future swaps by this address
-    end
-
-    Note over TM: 100-block challenge window opens
+    Ops->>Ops: Index events: SandwichDetected,<br/>JITDetected, SenderImpactCapped,<br/>SwapTelemetry
+    Ops->>Ops: Compute score from attack patterns
+    Ops->>TM: respondToScoreTask (aggregated BLS sig)
+    TM->>Oracle: setScore(subject, newScore)
 ```
-
-**Step-by-step breakdown:**
-
-| Step | Where | What happens | Gas impact |
-|:----:|:-----:|--------------|:----------:|
-| **1** | PoolManager | User calls `swap()`. PoolManager invokes the hook's `beforeSwap` callback. | — |
-| **2** | Hook → Oracle | Hook calls `oracle.getScore(sender)` — returns the decay-adjusted score (0–100). | ~5k |
-| **3** | Hook | **Score >= 80?** Swap reverts with `BotRejected`. The transaction fails — no tokens move. | — |
-| **4** | Hook → Oracle | **Stale check:** If score > 0 and `lastUpdated` is older than 7 days, triggers a BLS re-evaluation task. | ~50k if triggered |
-| **5** | Hook | **Sandwich detection (transient storage):** Uses `TLOAD`/`TSTORE` to check if this sender already swapped the same pool in the opposite direction this block, with a victim swap in between. If yes, emits `SandwichDetected` and triggers a BLS task (rate-limited: 1 per address per 50 blocks). | ~200 detection + ~50k if task triggered |
-| **6** | Hook | **Fee calculation:** `_computeFee(score)` applies the continuous curve. Score 0–39 pays 3000 pips (0.30%). Score 40–79 scales linearly up to 15000 pips (1.50%). | ~200 |
-| **7** | Hook → PoolManager | Returns the computed fee with `OVERRIDE_FEE_FLAG`. PoolManager executes the swap at that exact fee. LPs collect the fee. | — |
-| **8** | Hook | Emits `SwapTelemetry` with poolId, sender, direction, amount, score, fee, and block number. | ~2k |
-| **9** | Off-chain | AVS operators index `SwapTelemetry` and `ScoreTaskTriggered` events, independently compute a score for the flagged address, and sign with their BLS private keys. | — |
-| **10** | Off-chain → TaskManager | Aggregator collects partial BLS signatures, aggregates them, and submits `respondToScoreTask()`. The `BLSSignatureChecker` verifies the aggregated signature on-chain (~120k gas, constant regardless of operator count). | ~120k |
-| **11** | TaskManager → Oracle | If the quorum threshold (67%) is met, the score is written to the oracle. A 100-block challenge window opens for disputes. | ~25k |
-| **12** | Next swap | The updated score immediately affects this address's fee on all subsequent swaps across all GradientShield pools. | — |
-
-> **Key insight:** Detection and fee decisions are **synchronous** (same transaction, ~10k gas overhead).
-> Score updates are **asynchronous** (BLS quorum responds within 100 blocks).
-> The hook creates the feedback loop — it detects, triggers the quorum, and the quorum's response changes future fee decisions.
 
 ---
 
-### Continuous fee curve
+## Continuous fee curve
 
-Instead of a flat multiplier, the hook applies a **continuous linear fee curve**
-across the suspicious band. The fee rises smoothly from `BASE_FEE` (3000 pips)
-at score 40 to `MAX_ESCALATED_FEE` (15000 pips) at score 79:
+The hook maps a **continuous 0-100 risk score** onto a **linear fee curve**:
 
 ```
 fee = BASE_FEE + (MAX_ESCALATED_FEE - BASE_FEE) × (score - 40) / (80 - 40)
 ```
 
-| Score | Band | Fee (pips) | Behaviour | Events |
-|:-----:|:----:|:----------:|-----------|--------|
-| **0-39** | Clean | 3000 (0.30%) | Base fee | `SwapTelemetry` |
-| **40** | Suspicious (low) | 3000 (0.30%) | Curve entry | `FeeEscalated`, `SwapTelemetry` |
-| **50** | Suspicious | 6000 (0.60%) | 2x base | `FeeEscalated`, `SwapTelemetry` |
-| **60** | Suspicious | 9000 (0.90%) | 3x base | `FeeEscalated`, `SwapTelemetry` |
-| **75** | Suspicious (high) | 13500 (1.35%) | 4.5x base | `FeeEscalated`, `SwapTelemetry` |
-| **80-100** | Confirmed toxic | — | **Reverts** `BotRejected` | `BotRejectedEvent` |
+| Score | Band | Fee (pips) | Behaviour |
+|:-----:|:----:|:----------:|-----------|
+| **0-39** | Clean | 3000 (0.30%) | Base fee |
+| **40** | Suspicious (low) | 3000 (0.30%) | Curve entry |
+| **50** | Suspicious | 6000 (0.60%) | 2x base |
+| **60** | Suspicious | 9000 (0.90%) | 3x base |
+| **75** | Suspicious (high) | 13500 (1.35%) | 4.5x base |
+| **80-100** | Confirmed toxic | — | **Reverts** `BotRejected` |
+
+---
+
+## Impact guards (first-trade protection)
+
+These guards use **transient storage** and act on the very first trade — no
+reputation history needed.
+
+### Sender impact cap
+
+- **Constant:** `SENDER_IMPACT_CAP = 5 ether`
+- Tracks cumulative `abs(amountSpecified)` per sender per pool per block
+- **Reverts** with `SenderImpactExceeded` when exceeded
+- Prevents the back-run leg of a sandwich from executing
+- Independent per sender — one sender's volume doesn't affect another's
+- Resets automatically each block (transient storage)
+
+### Pool impact guard
+
+- **Constant:** `POOL_IMPACT_THRESHOLD = 10 ether`
+- Tracks cumulative volume across *all* senders per pool per block
+- When exceeded, subsequent swaps pay `IMPACT_PENALTY_FEE` (15000 pips = 1.50%)
+- Does not revert — applies a penalty fee instead
+- Makes large-volume manipulation unprofitable even when split across addresses
+
+### Pending score flag (`_pendingScoreFlag`)
+
+When a sender uses >50% of the impact cap in a single block, the hook sets a
+persistent flag. On the sender's *next successful swap* (even in a future block),
+the hook auto-triggers an AVS scoring task before clearing the flag. This
+bridges the gap between the immediate revert (which rolls back all state) and
+the asynchronous AVS scoring pipeline.
+
+---
+
+## AVS scoring algorithm
+
+The operator scores addresses based on **actual attack patterns** observed
+on-chain, not transaction count. The operator reads hook events
+(`SandwichDetected`, `JITDetected`, `SenderImpactCapped`, `SwapTelemetry`)
+and applies weighted scoring:
+
+| Signal | Points | Source |
+|--------|:------:|--------|
+| Sandwich detected | **+35** per occurrence | `SandwichDetected` event |
+| Impact cap hit | **+30** per occurrence | `SenderImpactCapped` event |
+| JIT detected | **+25** per occurrence | `JITDetected` event |
+| Round-trip ratio >40% | **+20** | `SwapTelemetry` analysis |
+| High frequency (10+ swaps) | **+15** | `SwapTelemetry` count |
+| Multi-pool activity (3+) | **+10** | Cross-pool event analysis |
+
+**First-offense floor:** Any detection guarantees a minimum score of **35**,
+placing the address in the suspicious band immediately.
+
+### Progressive escalation
+
+Scores are **cumulative** — each offense adds to the existing (decayed) score:
+
+| Offense | Score delta | Cumulative | Hook action |
+|:-------:|:----------:|:----------:|-------------|
+| 1st sandwich | +35 | ~35 | Enters suspicious band, escalated fee |
+| 2nd sandwich | +35 | ~70 | Deep suspicious, ~1.25% fee |
+| 3rd sandwich | +35 | ~85+ | **REJECTED** — swap reverts |
 
 ### Score decay
 
 Scores decay linearly at **5 points per day**. An address scored 85 (rejected)
-that stops attacking will:
+that stops attacking:
 - Day 1: 80 (still rejected)
-- Day 2: 75 (suspicious, 13500 pips = 4.5x fee)
+- Day 2: 75 (suspicious, 1.35% fee)
 - Day 9: 40 (border of suspicious, back to base fee)
 - Day 17: 0 (fully clean)
 
-This prevents permanent bans and lets reformed addresses re-enter the pool.
-
----
-
-## Multi-hop swaps via `unlockCallback` (ERC6909 settlement)
-
-GradientShield supports atomic multi-hop swaps (A→B→C→…) through the
-`unlockCallback` pattern. The hook calls `poolManager.unlock()`, which
-unlocks the PoolManager's internal accounting and then calls back into
-the hook's `unlockCallback`. Inside the callback, all swap legs execute
-sequentially — intermediate token deltas cancel out inside the PoolManager's
-internal accounting, and only the net input/output are settled.
-
-Settlement uses **ERC6909 claim tokens** instead of ERC-20 `transferFrom`:
-- **Debits** (tokens owed by the trader): `poolManager.burn(sender, currencyId, amount)`
-- **Credits** (tokens owed to the trader): `poolManager.mint(sender, currencyId, amount)`
-
-This design has two safety advantages over ERC-20 settlement:
-1. **No approvals to the hook** — the trader approves the hook as an ERC6909
-   operator on the PoolManager (`setOperator(hook, true)`), not a token approval
-2. **No reentrancy risk** — `burn`/`mint` are internal PoolManager accounting,
-   not external contract calls
-
-The `onlyPoolManager` modifier (from `ImmutableState`, BaseHook's parent)
-ensures only the PoolManager can invoke `unlockCallback`.
-
----
-
-## hookData attestation (optional)
-
-Swappers can skip the on-chain oracle `SLOAD` by passing an ECDSA-signed
-score attestation in the swap's `hookData`. The attestor (set at deploy time)
-signs `(sender, score, expiry, chainId, hookAddress)` off-chain; the hook
-verifies the signature and uses the attested score directly.
-
-Fallback to the on-chain oracle happens automatically when:
-- `hookData` is empty
-- No attestor is configured (`attestor == address(0)`)
-- The signature is invalid or from the wrong key
-- The attestation has expired (`block.timestamp > expiry`)
-
-> **Note:** This feature is designed for latency-sensitive integrations, not
-> gas savings. ECDSA `ecrecover` (~3,000 gas) plus calldata costs make the
-> attestation path slightly more expensive than a warm oracle `SLOAD` (~5,000
-> gas total). The value is in avoiding a round-trip to the oracle contract.
+This prevents permanent bans — reformed addresses re-enter the pool naturally.
 
 ---
 
 ## On-chain MEV detection
 
-The hook detects two MEV patterns directly on-chain. When a pattern is
-detected, the hook **auto-triggers a BLS scoring task** on the TaskManager
-(rate-limited to one task per address per 50 blocks via `TASK_COOLDOWN_BLOCKS`).
-
 ### Sandwich detection
 
 Flags an address that swaps in **opposite directions within the same block** on
 the same pool, with at least one intervening swap by a different address (the
-victim). This catches the classic front-run/back-run pattern.
+victim).
 
-- Tracks per-pool, per-address first-swap direction (`_firstSwap`)
-- Counts total swaps per pool per block (`_blockSwaps`)
+- Uses transient storage: `_firstSwap` (direction), `_blockSwaps` (count)
 - Requires `count >= 2` (victim swapped between) AND opposite direction
 - Emits `SandwichDetected(poolId, swapper, blockNumber)`
 - Auto-triggers `ScoreTaskTriggered(subject, blockNumber, "sandwich")`
@@ -260,126 +267,75 @@ victim). This catches the classic front-run/back-run pattern.
 ### JIT liquidity detection
 
 Flags an address that adds and removes liquidity **within the same block** on
-the same pool — the hallmark of just-in-time liquidity provision that extracts
-value from pending swaps.
+the same pool.
 
-- Records add-liquidity block per (pool, provider) in `_liquidityAdds`
+- Records add-liquidity block in `_liquidityAdds`
 - Checks on remove-liquidity if add happened same block
 - Emits `JITDetected(poolId, provider, blockNumber)`
 - Auto-triggers `ScoreTaskTriggered(subject, blockNumber, "jit")`
 
-### Stale score re-evaluation
-
-If a swapper has a non-zero score that was last updated more than 7 days ago
-(`STALENESS_THRESHOLD`), the hook auto-triggers a BLS re-evaluation task
-(`ScoreTaskTriggered(subject, blockNumber, "stale")`). This ensures scores
-reflect the current quorum consensus, not just historical data.
-
 ### Transient storage (EIP-1153)
 
-All per-block detection state uses **transient storage** (`TSTORE`/`TLOAD`)
-instead of regular storage (`SSTORE`/`SLOAD`). This is a natural fit because
-sandwich and JIT tracking data is only relevant within the current block —
-it never needs to persist across transactions.
+All per-block detection state uses **transient storage** (`TSTORE`/`TLOAD`):
 
 | Operation | Regular storage | Transient storage | Savings |
 |-----------|:--------------:|:-----------------:|:-------:|
 | Write (cold) | 22,100 gas | 100 gas | **99.5%** |
 | Write (warm) | 5,000 gas | 100 gas | **98%** |
 | Read (cold) | 2,100 gas | 100 gas | **95%** |
-| Read (warm) | 100 gas | 100 gas | — |
 
-Measured gas savings on detection tests:
+Five transient namespaces prevent slot collisions:
+- `GradientShield.firstSwap` — sandwich direction tracking
+- `GradientShield.blockSwaps` — victim swap counting
+- `GradientShield.liquidityAdds` — JIT detection
+- `GradientShield.poolImpact` — pool-level volume tracking
+- `GradientShield.senderImpact` — per-sender volume tracking
 
-| Test | Before | After | Saved |
-|------|:------:|:-----:|:-----:|
-| Sandwich detected | 449,235 | 317,426 | **29%** |
-| JIT detected | 443,168 | 333,491 | **25%** |
-| Full escalation flow | 585,424 | 453,376 | **23%** |
+---
 
-Three transient namespaces keyed by `(poolId, sender, block.number)`:
-- **`GradientShield.firstSwap`** — records the first swap direction per
-  (pool, swapper) for sandwich back-run detection
-- **`GradientShield.blockSwaps`** — counts total swaps per pool to confirm
-  an intervening victim swap
-- **`GradientShield.liquidityAdds`** — flags add-liquidity for same-block
-  JIT removal detection
+## Multi-hop swaps via `unlockCallback` (ERC6909 settlement)
 
-Only `_lastTaskBlock` (task rate-limiting) uses persistent storage since it
-must survive across transactions.
+Supports atomic multi-hop swaps (A→B→C→…) through the `unlockCallback` pattern.
+Settlement uses **ERC6909 claim tokens** — no ERC-20 approvals to the hook, no
+reentrancy risk.
+
+---
+
+## hookData attestation (optional)
+
+Swappers can skip the on-chain oracle `SLOAD` by passing an ECDSA-signed score
+attestation in the swap's `hookData`. The attestor signs
+`(sender, score, expiry, chainId, hookAddress)` off-chain; the hook verifies
+the signature and uses the attested score directly. Falls back to on-chain
+oracle when hookData is empty or invalid.
 
 ---
 
 ## BLS multi-operator quorum
 
-GradientShield uses EigenLayer's BLS signature infrastructure for decentralized
-score consensus. Multiple operators must independently agree on a score before
-it can be written on-chain.
+Uses EigenLayer's BLS signature infrastructure for decentralized score consensus.
 
-### How scoring works
+1. **Task creation:** The hook auto-triggers tasks on sandwich/JIT/impact
+   detection. The off-chain generator can also create tasks via `createScoreTask()`.
+2. **Operator consensus:** Each operator independently computes a score by
+   reading hook events, then signs with their BLS private key.
+3. **Aggregation:** The aggregator collects partial BLS signatures and submits
+   `respondToScoreTask()` with `NonSignerStakesAndSignature` proof.
+4. **On-chain verification:** `BLSSignatureChecker` verifies the aggregated
+   BLS signature (~120k gas, constant regardless of operator count).
+5. **Score write:** If 67% quorum threshold is met, the score is written to
+   `ScoringOracle`. A 100-block challenge window allows disputes.
 
-1. **Task creation:** Tasks are created by two sources: the **hook itself**
-   (auto-triggered when sandwich or JIT patterns are detected on-chain) and
-   the **generator** (off-chain watcher) via `createScoreTask()`. Both paths
-   feed into the same BLS quorum pipeline.
+---
 
-2. **Operator consensus:** Each registered operator independently computes a
-   score for the target address over the specified block range. They sign the
-   response with their BLS private key.
+## Known limitations
 
-3. **Aggregation:** The aggregator collects BLS partial signatures, aggregates
-   them into a single signature, and submits `respondToScoreTask()` with the
-   `NonSignerStakesAndSignature` proof.
-
-4. **On-chain verification:** The `BLSSignatureChecker` (inherited from
-   EigenLayer middleware) verifies:
-   - The aggregated BLS signature is valid (BN254 pairing check)
-   - The signed stake meets the quorum threshold percentage
-   - The response is within the `TASK_RESPONSE_WINDOW_BLOCK` (100 blocks)
-
-5. **Score write:** If verification passes, the score is written to the
-   `ScoringOracle`, immediately affecting all subsequent swaps.
-
-### Challenge mechanism
-
-After a score is submitted, anyone can dispute it within
-`TASK_CHALLENGE_WINDOW_BLOCK` (100 blocks) by calling
-`raiseAndResolveChallenge()`. A successful challenge:
-- Invalidates the task response
-- Resets the subject's score to 0
-- Emits `TaskChallengedSuccessfully`
-
-The challenge verifies that the non-signer pubkey hashes match the stored
-signatory record, proving the quorum was not properly formed.
-
-### Hook ↔ BLS auto-trigger
-
-When the hook detects a sandwich or JIT pattern on-chain, it automatically
-creates a scoring task on the `TaskManager` via `IScoreTaskCreator`. This
-closes the feedback loop: on-chain detection → BLS quorum evaluation →
-score update → fee adjustment on subsequent swaps.
-
-- The hook is registered as a task creator on the TaskManager via
-  `setHookAddress()` during deployment
-- Task creation is wrapped in `try/catch` — if it fails (TaskManager
-  paused, not registered, etc.), the swap still proceeds normally
-- **Per-address rate limiting:** one task per address per 50 blocks
-  (`TASK_COOLDOWN_BLOCKS`) prevents task spam from repeated detections
-- **Stale score re-evaluation:** scores not refreshed in 7 days
-  (`STALENESS_THRESHOLD`) auto-trigger a BLS re-evaluation on the next swap
-- 10-block lookback window (`DETECTION_LOOKBACK`) and 67% quorum threshold
-  (`DETECTION_QUORUM_THRESHOLD`) for auto-created tasks
-- A lightweight `IScoreTaskCreator` interface avoids pulling BLS/EigenLayer
-  dependencies into the hook's compilation unit (solc 0.8.26 vs 0.8.27)
-
-### Why BLS over ECDSA
-
-| Property | ECDSA (single operator) | BLS (multi-operator quorum) |
-|----------|------------------------|----------------------------|
-| Trust model | One operator, one key | N operators must agree |
-| Verification cost | ~30k gas per operator | ~120k gas total (constant) |
-| Signature size | Grows linearly with N | Constant (one G1 point) |
-| Collusion resistance | None | Requires threshold fraction |
+| Limitation | Why | Mitigation |
+|------------|-----|------------|
+| **Cross-block sandwich** | Transient storage resets each block, so a buy in block N and sell in block N+1 is not detected | AVS operators can detect cross-block patterns off-chain and score accordingly |
+| **Fresh wallet evasion** | Attacker uses a new address for each attack to avoid score accumulation | Impact guards (layers 1-2) still block the back-run on every attempt regardless of address. The cap makes each attempt cost gas with no profit. |
+| **Split-router attacks** | Splitting volume across multiple addresses to stay under sender cap | Pool impact guard (layer 2) catches aggregate volume across all senders |
+| **Builder-level MEV** | Block builders can reorder transactions outside the hook's visibility | Out of scope for application-layer hooks; requires PBS/inclusion list solutions |
 
 ---
 
@@ -387,17 +343,16 @@ score update → fee adjustment on subsequent swaps.
 
 | Component | Layer | Responsibility |
 |-----------|:-----:|----------------|
-| `GradientShieldHook` | on-chain | The v4 hook. Reads scores, applies a **continuous fee curve**, detects sandwich/JIT patterns on-chain, **auto-triggers BLS scoring tasks** on detection (rate-limited, with stale-score re-evaluation), emits telemetry. |
-| `ScoringOracle` | on-chain | Stores one score per address with daily linear decay. Reads are open; writes are AVS-gated (`setScore` / `bumpScore`). |
-| `GradientShieldTaskManager` | on-chain | BLS task manager. Creates scoring tasks, verifies BLS-aggregated quorum signatures via `BLSSignatureChecker`, enforces response windows and challenge periods. |
-| `GradientShieldServiceManager` | on-chain | AVS identity layer extending `ServiceManagerBase`. Links to the TaskManager, handles EigenLayer registration and rewards. |
-| `PoolManager` | on-chain | Uniswap v4-core. Invokes the hook and honours dynamic-fee overrides. |
-| AVS Operators | off-chain | EigenLayer operators with BLS keys. Index `SwapTelemetry`, compute scores, sign with BLS. |
-| Aggregator | off-chain | Collects BLS partial signatures, aggregates, and submits to the TaskManager. |
+| `GradientShieldHook` | on-chain | v4 hook. Reads scores, applies fee curve, detects sandwich/JIT, enforces impact guards, auto-triggers BLS tasks, emits telemetry. |
+| `ScoringOracle` | on-chain | Per-address score store with 5-point/day linear decay. Reads open; writes AVS-gated. |
+| `GradientShieldTaskManager` | on-chain | BLS task manager. Creates scoring tasks, verifies BLS-aggregated quorum signatures, enforces response/challenge windows. |
+| `GradientShieldServiceManager` | on-chain | AVS identity layer. Links to TaskManager, handles EigenLayer registration. |
+| AVS Operators | off-chain | Read hook events, compute scores from attack patterns, sign with BLS. |
+| Aggregator | off-chain | Collects BLS partial signatures, aggregates, submits to TaskManager. |
 
 ---
 
-## Getting started (local reproduction)
+## Getting started
 
 ### Prerequisites
 
@@ -407,11 +362,11 @@ score update → fee adjustment on subsequent swaps.
 | **Git** | 2.x+ | System package manager |
 | **Node.js** (for off-chain operator) | 18+ | [nodejs.org](https://nodejs.org) |
 
-### Step 1 — Clone the repository
+### Clone and build
 
 ```bash
-git clone --recurse-submodules https://github.com/sivajialla/gradient-shield.git
-cd gradient-shield
+git clone --recurse-submodules https://github.com/DecentralizedGlasses/Gradient-Shield.git
+cd Gradient-Shield
 ```
 
 If you already cloned without `--recurse-submodules`:
@@ -420,54 +375,42 @@ If you already cloned without `--recurse-submodules`:
 git submodule update --init --recursive
 ```
 
-### Step 2 — Install Solidity compilers
-
 The project needs **two solc versions** (v4-core requires 0.8.26, EigenLayer
 middleware requires 0.8.27). Foundry's `auto_detect_solc = true` handles this
-automatically — it downloads the right compiler per file. No manual solc install
-needed if you have internet access during the first build.
-
-If you're on macOS and solc auto-download fails, install them manually:
-
-```bash
-# Download solc 0.8.26
-curl -L https://github.com/ethereum/solidity/releases/download/v0.8.26/solc-macos \
-  -o ~/.svm/0.8.26/solc-0.8.26 && chmod +x ~/.svm/0.8.26/solc-0.8.26
-
-# Download solc 0.8.27
-curl -L https://github.com/ethereum/solidity/releases/download/v0.8.27/solc-macos \
-  -o ~/.svm/0.8.27/solc-0.8.27 && chmod +x ~/.svm/0.8.27/solc-0.8.27
-```
-
-### Step 3 — Build
+automatically.
 
 ```bash
 forge build
 ```
 
-First build takes ~30-60 seconds as it compiles all dependencies (v4-core,
-eigenlayer-middleware, OpenZeppelin). Subsequent builds are incremental.
-
-### Step 4 — Run the tests
+### Run the tests
 
 ```bash
 forge test -vvv
 ```
 
-All 60 tests should pass:
+All 200 tests should pass:
 
 | Suite | Tests | What it covers |
 |-------|:-----:|----------------|
+| `HookEdgeCases.t.sol` | 36 | Edge cases across all hook logic |
+| `HookCoverage.t.sol` | 30 | Line coverage for hook paths |
+| `ImpactGuard.t.sol` | 24 | Sender cap, pool guard, sandwich blocking, scoring trigger |
+| `AccessControl.t.sol` | 22 | Permission and access control checks |
+| `TaskManagerAccess.t.sol` | 16 | Task manager permission paths |
 | `ScoringOracle.t.sol` | 15 | Decay, bump, access control, ownership |
 | `TaskManager.t.sol` | 13 | BLS task lifecycle, response window, challenges |
 | `ServiceManager.t.sol` | 8 | Initialization, task manager linking, ownership |
-| `HookBehavior.t.sol` | 5 | Fee ladder, dynamic fee override, permissions |
+| `HookAttestorCoverage.t.sol` | 7 | Attestor-related hook paths |
 | `MEVAttackDefense.t.sol` | 6 | Sandwich/JIT detection, full escalation flow |
+| `HookBehavior.t.sol` | 5 | Fee ladder, dynamic fee override, permissions |
 | `HookDataAttestation.t.sol` | 5 | ECDSA attestation via hookData, fallback paths |
-| `MultiHopSwap.t.sol` | 3 | ERC6909 multi-hop settlement, deadline, single-hop |
 | `DemoSimulation.t.sol` | 5 | End-to-end scoring scenarios with BLS quorum |
+| `MEVSimulation.t.sol` | 4 | MEV attack simulations |
+| `MultiHopSwap.t.sol` | 3 | ERC6909 multi-hop settlement |
+| `SandwichAttackSim.t.sol` | 1 | Full 6-phase sandwich simulation |
 
-### Step 5 — Run the demo scenarios
+### Run the demo scenarios
 
 Watch the 5-scenario scoring demo with console output:
 
@@ -475,36 +418,26 @@ Watch the 5-scenario scoring demo with console output:
 forge test --match-path test/DemoSimulation.t.sol -vvv
 ```
 
-This shows clean traders, occasional MEV extractors, persistent sandwich bots,
-reformed bots decaying back to clean, and a side-by-side comparison — all scored
-through the BLS quorum flow.
-
-### Step 6 — Set up the off-chain operator (optional)
-
-The `operator/` directory contains a Node.js operator that watches for scoring
-tasks and submits responses. To set it up:
+### Set up the off-chain operator (optional)
 
 ```bash
 cd operator
 npm install
 ```
 
-Create a `.env` file in the `operator/` directory:
+Create a `.env` file from the example:
 
-```env
-PRIVATE_KEY=<your_private_key>
-RPC_URL=<sepolia_rpc_url>
-SERVICE_MANAGER_ADDRESS=<deployed_service_manager_address>
-TASK_MANAGER_ADDRESS=<deployed_task_manager_address>
-ORACLE_ADDRESS=<deployed_oracle_address>
+```bash
+cp .env.example .env
 ```
 
-Run the operator:
+Fill in `RPC_URL`, `OPERATOR_PRIVATE_KEY`, `SERVICE_MANAGER_ADDRESS`,
+`SCORING_ORACLE_ADDRESS`, and `HOOK_ADDRESS` (printed by the deploy script).
 
 ```bash
 npm run operator        # start the operator node (watches for tasks)
 npm run create-task     # create a scoring task
-npm run score           # check an address's current score
+npm run score           # check/score an address
 ```
 
 ### Makefile shortcuts
@@ -515,84 +448,54 @@ make install            # install Solidity + Node.js deps
 make build              # forge build
 make test               # forge test -vvv
 make demo               # run the 5-scenario demo
-make fmt                # format Solidity sources
-make clean              # remove build artifacts
-make sizes              # contract size report
-make mine-hook          # mine CREATE2 hook address
 make deploy-sepolia     # deploy to Sepolia (needs env vars)
 make operator           # start the off-chain operator node
-make create-task        # create a scoring task
-make score              # check an address's current score
 ```
 
-### Troubleshooting
+---
 
-| Problem | Fix |
-|---------|-----|
-| `submodule not found` | Run `git submodule update --init --recursive` |
-| `solc 0.8.26 not found` | See Step 2 above for manual solc install |
-| `HookAddressNotValid` | The hook address must encode permission flags in its bottom 14 bits — `HookMiner.find()` handles this via CREATE2 salt mining |
-| `Stack too deep` | Some deploy scripts need `--via-ir` — run `forge script ... --via-ir` |
-| Tests fail with `EvmError: Revert` | Make sure submodules are at the pinned revisions — `git submodule update --init --recursive` |
+## Verification checklist
 
-## Repository layout
+### Local (Foundry)
 
-```
-.
-├── src/
-│   ├── GradientShieldHook.sol          v4 hook with sandwich/JIT detection,
-│   │                                    unlockCallback multi-hop, ERC6909 settlement,
-│   │                                    hookData attestation
-│   ├── GradientShieldTaskManager.sol   BLS quorum task manager
-│   ├── GradientShieldServiceManager.sol AVS service manager (BLS variant)
-│   ├── IGradientShieldTaskManager.sol  task manager interface & structs
-│   ├── IScoreTaskCreator.sol          lightweight hook→TaskManager interface
-│   └── ScoringOracle.sol              per-address score store with decay
-├── test/
-│   ├── HookBehavior.t.sol             hook fee-ladder tests
-│   ├── MEVAttackDefense.t.sol         sandwich/JIT/escalation tests
-│   ├── HookDataAttestation.t.sol      ECDSA attestation via hookData
-│   ├── MultiHopSwap.t.sol             ERC6909 multi-hop settlement tests
-│   ├── ScoringOracle.t.sol            scoring + decay tests
-│   ├── TaskManager.t.sol              BLS task lifecycle tests
-│   ├── ServiceManager.t.sol           service manager tests
-│   └── DemoSimulation.t.sol           end-to-end demo scenarios
-├── script/
-│   ├── Deploy.s.sol                   mainnet deploy with BLS infra
-│   ├── DeploySepolia.s.sol            Sepolia deploy with mock BLS
-│   └── MineHookAddress.s.sol          CREATE2 hook address miner
-├── operator/                          off-chain operator node (Node.js)
-├── lib/                               git-submodule dependencies
-├── foundry.toml                       auto_detect_solc, Cancun EVM
-├── remappings.txt                     import-path aliases
-└── README.md                          this file
+```bash
+forge test -vvv                                    # all 200 tests pass
+forge test --match-path test/ImpactGuard.t.sol -vvv # impact guard tests
+forge test --match-path test/SandwichAttackSim.t.sol -vvv # sandwich sim
 ```
 
-## Multi-solc compilation
+### Fork testing (Sepolia)
 
-The project uses `auto_detect_solc = true` in `foundry.toml` because:
-- Uniswap v4-core requires **exactly solc 0.8.26**
-- EigenLayer middleware requires **solc ^0.8.27**
+```bash
+forge test --fork-url $SEPOLIA_RPC -vvv
+```
 
-Foundry automatically resolves the correct compiler per file based on pragma
-declarations. Project source files use `pragma ^0.8.26` to compile with either
-version.
+### Testnet deployment
 
-## Dependency versions
+```bash
+export PRIVATE_KEY=<key>
+export POOL_MANAGER=<sepolia_pool_manager>
+forge script script/DeploySepolia.s.sol --rpc-url $SEPOLIA_RPC --broadcast
+```
 
-| Dependency | Pinned rev | Why |
-|------------|-----------|-----|
-| `v4-core` | `59d3ecf` | Has `types/PoolOperation.sol` (`SwapParams`, `ModifyLiquidityParams`) |
-| `v4-periphery` | `3779387` | Last commit with `src/utils/BaseHook.sol` (removed in #510) |
-| `eigenlayer-middleware` | v1.5 | BLS infrastructure (`BLSSignatureChecker`, `ServiceManagerBase`, `RegistryCoordinator`) |
-| `forge-std` | `v1.16.2` | -- |
+The deploy script outputs all contract addresses. Set them in `operator/.env`
+and run `npm run operator` to start watching for scoring tasks.
+
+---
 
 ## Deploy
 
+### Sepolia (with mock BLS infrastructure)
+
+```bash
+export PRIVATE_KEY=<key>
+export POOL_MANAGER=<address>
+forge script script/DeploySepolia.s.sol --rpc-url $RPC_URL --broadcast
+```
+
 ### Mainnet / testnet (with real BLS infrastructure)
 
-Requires EigenLayer core + BLS infrastructure (RegistryCoordinator, BLSApkRegistry,
-StakeRegistry) already deployed on the target chain.
+Requires EigenLayer core + BLS infrastructure already deployed:
 
 ```bash
 export PRIVATE_KEY=<key>
@@ -610,14 +513,60 @@ export GENERATOR=<generator_address>
 forge script script/Deploy.s.sol --rpc-url $RPC_URL --broadcast
 ```
 
-### Sepolia (with mock infrastructure)
+---
 
-Deploys mock BLS infrastructure for testing without real operator stake:
+## Repository layout
 
-```bash
-export PRIVATE_KEY=<key>
-forge script script/DeploySepolia.s.sol --rpc-url $RPC_URL --broadcast
 ```
+.
+├── src/
+│   ├── GradientShieldHook.sol          v4 hook: fee curve, sandwich/JIT detection,
+│   │                                    impact guards, multi-hop, attestation
+│   ├── GradientShieldTaskManager.sol   BLS quorum task manager
+│   ├── GradientShieldServiceManager.sol AVS service manager (BLS variant)
+│   ├── IGradientShieldTaskManager.sol  task manager interface & structs
+│   ├── IScoreTaskCreator.sol          lightweight hook→TaskManager interface
+│   └── ScoringOracle.sol              per-address score store with decay
+├── test/
+│   ├── ImpactGuard.t.sol              impact guard tests (24 tests)
+│   ├── HookEdgeCases.t.sol            edge cases (36 tests)
+│   ├── HookCoverage.t.sol             coverage paths (30 tests)
+│   ├── AccessControl.t.sol            permissions (22 tests)
+│   ├── TaskManagerAccess.t.sol        task manager access (16 tests)
+│   ├── ScoringOracle.t.sol            scoring + decay (15 tests)
+│   ├── TaskManager.t.sol              BLS task lifecycle (13 tests)
+│   ├── ServiceManager.t.sol           service manager (8 tests)
+│   ├── HookAttestorCoverage.t.sol     attestor paths (7 tests)
+│   ├── MEVAttackDefense.t.sol         sandwich/JIT/escalation (6 tests)
+│   ├── HookBehavior.t.sol             fee ladder (5 tests)
+│   ├── HookDataAttestation.t.sol      ECDSA attestation (5 tests)
+│   ├── DemoSimulation.t.sol           end-to-end demo (5 tests)
+│   ├── MEVSimulation.t.sol            MEV simulations (4 tests)
+│   ├── MultiHopSwap.t.sol             multi-hop settlement (3 tests)
+│   └── SandwichAttackSim.t.sol        sandwich simulation (1 test)
+├── script/
+│   ├── Deploy.s.sol                   mainnet deploy with BLS infra
+│   ├── DeploySepolia.s.sol            Sepolia deploy with mock BLS
+│   └── MineHookAddress.s.sol          CREATE2 hook address miner
+├── operator/
+│   ├── operator.js                    event-based scoring operator
+│   ├── scoreAddress.js                manual address scoring tool
+│   ├── createTask.js                  task creation script
+│   └── abi/                           contract ABIs for operator
+├── lib/                               git-submodule dependencies
+├── foundry.toml                       auto_detect_solc, Cancun EVM
+├── remappings.txt                     import-path aliases
+└── README.md                          this file
+```
+
+## Dependency versions
+
+| Dependency | Pinned rev | Why |
+|------------|-----------|-----|
+| `v4-core` | `59d3ecf` | Has `types/PoolOperation.sol` (`SwapParams`, `ModifyLiquidityParams`) |
+| `v4-periphery` | `3779387` | Last commit with `src/utils/BaseHook.sol` (removed in #510) |
+| `eigenlayer-middleware` | v1.5 | BLS infrastructure (`BLSSignatureChecker`, `ServiceManagerBase`, `RegistryCoordinator`) |
+| `forge-std` | `v1.16.2` | — |
 
 ---
 
@@ -633,18 +582,7 @@ pattern with the following adaptations:
 | `IncredibleSquaringTaskManager` | `GradientShieldTaskManager` — creates scoring tasks, verifies BLS-aggregated quorum signatures |
 | `IncredibleSquaringServiceManager` | `GradientShieldServiceManager` — AVS identity layer, operator registration |
 | Task: square a number | Task: compute MEV risk score for a flagged address over a block range |
-| Off-chain operator logic | `operator/` — indexes `SwapTelemetry` events, computes scores, signs with BLS |
-
-**Key EigenLayer contracts used:**
-- `BLSSignatureChecker` — BN254 pairing check for aggregated BLS signatures
-- `ServiceManagerBase` — AVS registration, rewards, slashing coordination
-- `ISlashingRegistryCoordinator` — operator quorum management
-- `IStakeRegistry` — stake-weighted quorum threshold verification
-
-The hook itself is the novel component — it integrates directly with the AVS
-by auto-triggering BLS scoring tasks when on-chain MEV patterns (sandwich, JIT)
-are detected, closing the feedback loop between detection and consensus-driven
-score updates.
+| Off-chain operator logic | `operator/` — indexes hook events, computes scores from attack patterns, signs with BLS |
 
 ---
 
@@ -654,6 +592,5 @@ The LP fee redistribution concept and BLS task manager architecture were inspire
 by [krisoshea-eth](https://github.com/krisoshea-eth)'s
 [MEV-Auction-Hook](https://github.com/krisoshea-eth/MEV-Auction-Hook).
 GradientShield takes a different approach — instant swaps with score-based MEV
-taxation rather than auction-paused execution — but the BLS quorum pattern for
-AVS task verification follows a similar structure. Credit and thanks to the
-original author.
+taxation and same-block impact guards rather than auction-paused execution — but
+the BLS quorum pattern for AVS task verification follows a similar structure.
