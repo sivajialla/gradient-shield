@@ -18,6 +18,7 @@ import {CustomRevert} from "@uniswap/v4-core/src/libraries/CustomRevert.sol";
 
 import {GradientShieldHook} from "../src/GradientShieldHook.sol";
 import {ScoringOracle} from "../src/ScoringOracle.sol";
+import {IScoreTaskCreator} from "../src/IScoreTaskCreator.sol";
 
 contract HookBehaviorTest is Test, Deployers {
     using PoolIdLibrary for PoolKey;
@@ -40,9 +41,11 @@ contract HookBehaviorTest is Test, Deployers {
             address(this),
             flags,
             type(GradientShieldHook).creationCode,
-            abi.encode(manager, oracle)
+            abi.encode(manager, oracle, IScoreTaskCreator(address(0)))
         );
-        hook = new GradientShieldHook{salt: salt}(IPoolManager(manager), oracle);
+        hook = new GradientShieldHook{salt: salt}(
+            IPoolManager(manager), oracle, IScoreTaskCreator(address(0))
+        );
         require(address(hook) == hookAddr, "hook address mismatch");
 
         deployMintAndApprove2Currencies();
@@ -76,8 +79,9 @@ contract HookBehaviorTest is Test, Deployers {
 
         PoolId poolId = key.toId();
 
+        // Continuous fee curve: fee = 3000 + (15000-3000) * (50-40) / (80-40) = 6000
         vm.expectEmit(true, true, false, true);
-        emit GradientShieldHook.FeeEscalated(poolId, address(swapRouter), 3000, 9000);
+        emit GradientShieldHook.FeeEscalated(poolId, address(swapRouter), 3000, 6000);
 
         swap(key, true, -100, ZERO_BYTES);
     }

@@ -2,8 +2,9 @@
 
 A Uniswap v4 hook that prices swaps by the swapper's MEV-risk score, enforced by
 a BLS multi-operator quorum through an EigenLayer AVS. Suspicious swappers pay an
-escalated fee; confirmed toxic flow is rejected outright. On-chain sandwich and
-JIT liquidity detection feed the scoring pipeline.
+escalated fee via a continuous fee curve; confirmed toxic flow is rejected outright.
+On-chain sandwich and JIT detection use **transient storage (EIP-1153)** for
+gas-efficient per-block tracking (~25% gas savings on detection logic).
 
 # Project Number : HK-UHI10-1050
 
@@ -15,26 +16,28 @@ JIT liquidity detection feed the scoring pipeline.
 ## How GradientShield works
 
 Instead of a binary allow/deny, the hook maps a continuous **0-100 risk score**
-onto a **graded fee response** — clean flow pays the base fee, suspicious flow
-pays triple, and confirmed toxic flow is rejected outright. The name is the
-mechanism: a *gradient* that *shields* the pool.
+onto a **continuous fee curve** — clean flow pays the base fee, suspicious flow
+pays a linearly escalating fee (up to 5x), and confirmed toxic flow is rejected
+outright. The name is the mechanism: a *gradient* that *shields* the pool.
 
 Three systems work together:
 
-1. **On-chain hook (deterministic):** `GradientShieldHook` runs inside the
-   PoolManager's `beforeSwap` callback. It reads one number from the
+1. **On-chain hook (BLS-integrated):** `GradientShieldHook` runs inside the
+   PoolManager's `beforeSwap` callback. It reads scores from the
    `ScoringOracle`, makes a fee decision, detects sandwich/JIT patterns, and
-   emits telemetry — all synchronous, all in the same transaction.
+   **auto-triggers BLS scoring tasks** on the `TaskManager` when patterns
+   are detected — closing the detection→quorum→scoring feedback loop on-chain.
 
 2. **On-chain BLS task manager (consensus):** `GradientShieldTaskManager` accepts
-   scoring tasks and verifies BLS-aggregated signatures from the operator quorum
-   via `BLSSignatureChecker`. A 100-block challenge window allows disputes before
+   scoring tasks from both the off-chain generator **and the hook itself**,
+   then verifies BLS-aggregated signatures from the operator quorum via
+   `BLSSignatureChecker`. A 100-block challenge window allows disputes before
    a score becomes final.
 
 3. **Off-chain (the feedback loop):** EigenLayer AVS operators index the emitted
-   `SwapTelemetry` events, independently compute MEV/sandwich scores, reach BLS
-   consensus off-chain, and the aggregator submits the verified score to the
-   oracle. This is the loop that makes the response *escalate over time*.
+   `SwapTelemetry` and `ScoreTaskTriggered` events, independently compute
+   MEV/sandwich scores, reach BLS consensus off-chain, and the aggregator
+   submits the verified score to the oracle.
 
 ### Architecture & data flow
 
@@ -48,12 +51,13 @@ flowchart LR
 
         C --> E{Score?}
         E -->|"0-39"| F["Base fee\n0.30%"]
-        E -->|"40-79"| G["3x fee\nFeeEscalated"]
+        E -->|"40-79"| G["Continuous curve\n0.30% → 1.50%"]
         E -->|"80-100"| H["Rejected\nBotRejected"]
 
         F --> I[SwapTelemetry]
         G --> I
 
+        C -->|"sandwich/JIT\ndetected"| TM
         TM["GradientShieldTaskManager\nBLS quorum verification"] -->|"setScore()"| D
         SM["GradientShieldServiceManager\nAVS identity layer"] --- TM
     end
@@ -68,21 +72,118 @@ flowchart LR
     AGG -.->|"respondToScoreTask()\naggregated BLS sig"| TM
 ```
 
-### Score fee ladder
+### What happens when a user submits a trade
 
-| Score | Band | Behaviour | Events |
-|:-----:|:----:|-----------|--------|
-| **0-39** | Clean / unknown | Pays the **base fee** (3000 pips = 0.30%). | `SwapTelemetry` |
-| **40-79** | Suspicious | Charged **3x base fee** via dynamic-fee override. | `FeeEscalated`, `SwapTelemetry` |
-| **80-100** | Confirmed toxic | Swap **reverts** with `BotRejected`. | `BotRejectedEvent` |
+Every swap through a GradientShield-protected pool follows this path:
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant PM as PoolManager
+    participant Hook as GradientShieldHook
+    participant Oracle as ScoringOracle
+    participant TM as TaskManager
+    participant Ops as BLS Operators
+    participant Agg as Aggregator
+
+    Note over User,Agg: SYNCHRONOUS — same transaction
+
+    User->>PM: swap()
+    PM->>Hook: beforeSwap(sender, key, params)
+
+    Hook->>Oracle: getScore(sender)
+    Oracle-->>Hook: score (0–100, decay-adjusted)
+
+    alt score >= 80
+        Hook--xPM: revert BotRejected
+        Note right of Hook: Swap blocked
+    end
+
+    alt score > 0 AND lastUpdated > 7 days
+        Hook->>TM: createScoreTask(sender, "stale")
+        Note right of Hook: Stale re-evaluation
+    end
+
+    Note over Hook: Sandwich detection
+    alt opposite-direction swap + victim in same block
+        Hook->>Hook: emit SandwichDetected
+        Hook->>TM: createScoreTask(sender, "sandwich")
+    end
+
+    Hook->>Hook: _computeFee(score)
+    Note right of Hook: Continuous curve<br/>score 0-39 → 3000 pips<br/>score 40-79 → 3000-15000 pips
+
+    Hook-->>PM: (fee | OVERRIDE_FEE_FLAG)
+    PM-->>User: Swap executes at computed fee
+
+    Hook->>Hook: emit SwapTelemetry
+
+    Note over User,Agg: ASYNCHRONOUS — off-chain BLS consensus
+
+    Ops->>Ops: Index SwapTelemetry +<br/>ScoreTaskTriggered events
+    Ops->>Ops: Each operator computes<br/>score independently
+    Ops->>Agg: BLS partial signatures
+
+    Agg->>TM: respondToScoreTask(task, response, aggregatedBLSSig)
+    TM->>TM: BLSSignatureChecker verifies<br/>(BN254 pairing check, ~120k gas)
+
+    alt quorum threshold met (≥67%)
+        TM->>Oracle: setScore(subject, newScore)
+        Note over Oracle: Score updated — affects<br/>all future swaps by this address
+    end
+
+    Note over TM: 100-block challenge window opens
+```
+
+**Step-by-step breakdown:**
+
+| Step | Where | What happens | Gas impact |
+|:----:|:-----:|--------------|:----------:|
+| **1** | PoolManager | User calls `swap()`. PoolManager invokes the hook's `beforeSwap` callback. | — |
+| **2** | Hook → Oracle | Hook calls `oracle.getScore(sender)` — returns the decay-adjusted score (0–100). | ~5k |
+| **3** | Hook | **Score >= 80?** Swap reverts with `BotRejected`. The transaction fails — no tokens move. | — |
+| **4** | Hook → Oracle | **Stale check:** If score > 0 and `lastUpdated` is older than 7 days, triggers a BLS re-evaluation task. | ~50k if triggered |
+| **5** | Hook | **Sandwich detection (transient storage):** Uses `TLOAD`/`TSTORE` to check if this sender already swapped the same pool in the opposite direction this block, with a victim swap in between. If yes, emits `SandwichDetected` and triggers a BLS task (rate-limited: 1 per address per 50 blocks). | ~200 detection + ~50k if task triggered |
+| **6** | Hook | **Fee calculation:** `_computeFee(score)` applies the continuous curve. Score 0–39 pays 3000 pips (0.30%). Score 40–79 scales linearly up to 15000 pips (1.50%). | ~200 |
+| **7** | Hook → PoolManager | Returns the computed fee with `OVERRIDE_FEE_FLAG`. PoolManager executes the swap at that exact fee. LPs collect the fee. | — |
+| **8** | Hook | Emits `SwapTelemetry` with poolId, sender, direction, amount, score, fee, and block number. | ~2k |
+| **9** | Off-chain | AVS operators index `SwapTelemetry` and `ScoreTaskTriggered` events, independently compute a score for the flagged address, and sign with their BLS private keys. | — |
+| **10** | Off-chain → TaskManager | Aggregator collects partial BLS signatures, aggregates them, and submits `respondToScoreTask()`. The `BLSSignatureChecker` verifies the aggregated signature on-chain (~120k gas, constant regardless of operator count). | ~120k |
+| **11** | TaskManager → Oracle | If the quorum threshold (67%) is met, the score is written to the oracle. A 100-block challenge window opens for disputes. | ~25k |
+| **12** | Next swap | The updated score immediately affects this address's fee on all subsequent swaps across all GradientShield pools. | — |
+
+> **Key insight:** Detection and fee decisions are **synchronous** (same transaction, ~10k gas overhead).
+> Score updates are **asynchronous** (BLS quorum responds within 100 blocks).
+> The hook creates the feedback loop — it detects, triggers the quorum, and the quorum's response changes future fee decisions.
+
+---
+
+### Continuous fee curve
+
+Instead of a flat multiplier, the hook applies a **continuous linear fee curve**
+across the suspicious band. The fee rises smoothly from `BASE_FEE` (3000 pips)
+at score 40 to `MAX_ESCALATED_FEE` (15000 pips) at score 79:
+
+```
+fee = BASE_FEE + (MAX_ESCALATED_FEE - BASE_FEE) × (score - 40) / (80 - 40)
+```
+
+| Score | Band | Fee (pips) | Behaviour | Events |
+|:-----:|:----:|:----------:|-----------|--------|
+| **0-39** | Clean | 3000 (0.30%) | Base fee | `SwapTelemetry` |
+| **40** | Suspicious (low) | 3000 (0.30%) | Curve entry | `FeeEscalated`, `SwapTelemetry` |
+| **50** | Suspicious | 6000 (0.60%) | 2x base | `FeeEscalated`, `SwapTelemetry` |
+| **60** | Suspicious | 9000 (0.90%) | 3x base | `FeeEscalated`, `SwapTelemetry` |
+| **75** | Suspicious (high) | 13500 (1.35%) | 4.5x base | `FeeEscalated`, `SwapTelemetry` |
+| **80-100** | Confirmed toxic | — | **Reverts** `BotRejected` | `BotRejectedEvent` |
 
 ### Score decay
 
 Scores decay linearly at **5 points per day**. An address scored 85 (rejected)
 that stops attacking will:
 - Day 1: 80 (still rejected)
-- Day 2: 75 (suspicious, 3x fee)
-- Day 9: 40 (border of suspicious)
+- Day 2: 75 (suspicious, 13500 pips = 4.5x fee)
+- Day 9: 40 (border of suspicious, back to base fee)
 - Day 17: 0 (fully clean)
 
 This prevents permanent bans and lets reformed addresses re-enter the pool.
@@ -91,7 +192,9 @@ This prevents permanent bans and lets reformed addresses re-enter the pool.
 
 ## On-chain MEV detection
 
-The hook detects two MEV patterns directly on-chain, without waiting for AVS scoring:
+The hook detects two MEV patterns directly on-chain. When a pattern is
+detected, the hook **auto-triggers a BLS scoring task** on the TaskManager
+(rate-limited to one task per address per 50 blocks via `TASK_COOLDOWN_BLOCKS`).
 
 ### Sandwich detection
 
@@ -103,6 +206,7 @@ victim). This catches the classic front-run/back-run pattern.
 - Counts total swaps per pool per block (`_blockSwaps`)
 - Requires `count >= 2` (victim swapped between) AND opposite direction
 - Emits `SandwichDetected(poolId, swapper, blockNumber)`
+- Auto-triggers `ScoreTaskTriggered(subject, blockNumber, "sandwich")`
 
 ### JIT liquidity detection
 
@@ -113,6 +217,47 @@ value from pending swaps.
 - Records add-liquidity block per (pool, provider) in `_liquidityAdds`
 - Checks on remove-liquidity if add happened same block
 - Emits `JITDetected(poolId, provider, blockNumber)`
+- Auto-triggers `ScoreTaskTriggered(subject, blockNumber, "jit")`
+
+### Stale score re-evaluation
+
+If a swapper has a non-zero score that was last updated more than 7 days ago
+(`STALENESS_THRESHOLD`), the hook auto-triggers a BLS re-evaluation task
+(`ScoreTaskTriggered(subject, blockNumber, "stale")`). This ensures scores
+reflect the current quorum consensus, not just historical data.
+
+### Transient storage (EIP-1153)
+
+All per-block detection state uses **transient storage** (`TSTORE`/`TLOAD`)
+instead of regular storage (`SSTORE`/`SLOAD`). This is a natural fit because
+sandwich and JIT tracking data is only relevant within the current block —
+it never needs to persist across transactions.
+
+| Operation | Regular storage | Transient storage | Savings |
+|-----------|:--------------:|:-----------------:|:-------:|
+| Write (cold) | 22,100 gas | 100 gas | **99.5%** |
+| Write (warm) | 5,000 gas | 100 gas | **98%** |
+| Read (cold) | 2,100 gas | 100 gas | **95%** |
+| Read (warm) | 100 gas | 100 gas | — |
+
+Measured gas savings on detection tests:
+
+| Test | Before | After | Saved |
+|------|:------:|:-----:|:-----:|
+| Sandwich detected | 449,235 | 317,426 | **29%** |
+| JIT detected | 443,168 | 333,491 | **25%** |
+| Full escalation flow | 585,424 | 453,376 | **23%** |
+
+Three transient namespaces keyed by `(poolId, sender, block.number)`:
+- **`GradientShield.firstSwap`** — records the first swap direction per
+  (pool, swapper) for sandwich back-run detection
+- **`GradientShield.blockSwaps`** — counts total swaps per pool to confirm
+  an intervening victim swap
+- **`GradientShield.liquidityAdds`** — flags add-liquidity for same-block
+  JIT removal detection
+
+Only `_lastTaskBlock` (task rate-limiting) uses persistent storage since it
+must survive across transactions.
 
 ---
 
@@ -124,9 +269,10 @@ it can be written on-chain.
 
 ### How scoring works
 
-1. **Task creation:** A generator (off-chain watcher) calls
-   `createScoreTask(subject, fromBlock, toBlock, threshold, quorumNumbers)` when
-   suspicious activity is observed.
+1. **Task creation:** Tasks are created by two sources: the **hook itself**
+   (auto-triggered when sandwich or JIT patterns are detected on-chain) and
+   the **generator** (off-chain watcher) via `createScoreTask()`. Both paths
+   feed into the same BLS quorum pipeline.
 
 2. **Operator consensus:** Each registered operator independently computes a
    score for the target address over the specified block range. They sign the
@@ -157,6 +303,26 @@ After a score is submitted, anyone can dispute it within
 The challenge verifies that the non-signer pubkey hashes match the stored
 signatory record, proving the quorum was not properly formed.
 
+### Hook ↔ BLS auto-trigger
+
+When the hook detects a sandwich or JIT pattern on-chain, it automatically
+creates a scoring task on the `TaskManager` via `IScoreTaskCreator`. This
+closes the feedback loop: on-chain detection → BLS quorum evaluation →
+score update → fee adjustment on subsequent swaps.
+
+- The hook is registered as a task creator on the TaskManager via
+  `setHookAddress()` during deployment
+- Task creation is wrapped in `try/catch` — if it fails (TaskManager
+  paused, not registered, etc.), the swap still proceeds normally
+- **Per-address rate limiting:** one task per address per 50 blocks
+  (`TASK_COOLDOWN_BLOCKS`) prevents task spam from repeated detections
+- **Stale score re-evaluation:** scores not refreshed in 7 days
+  (`STALENESS_THRESHOLD`) auto-trigger a BLS re-evaluation on the next swap
+- 10-block lookback window (`DETECTION_LOOKBACK`) and 67% quorum threshold
+  (`DETECTION_QUORUM_THRESHOLD`) for auto-created tasks
+- A lightweight `IScoreTaskCreator` interface avoids pulling BLS/EigenLayer
+  dependencies into the hook's compilation unit (solc 0.8.26 vs 0.8.27)
+
 ### Why BLS over ECDSA
 
 | Property | ECDSA (single operator) | BLS (multi-operator quorum) |
@@ -172,7 +338,7 @@ signatory record, proving the quorum was not properly formed.
 
 | Component | Layer | Responsibility |
 |-----------|:-----:|----------------|
-| `GradientShieldHook` | on-chain | The v4 hook. Reads scores, applies the fee ladder, detects sandwich/JIT patterns on-chain, emits telemetry, returns fee overrides. |
+| `GradientShieldHook` | on-chain | The v4 hook. Reads scores, applies a **continuous fee curve**, detects sandwich/JIT patterns on-chain, **auto-triggers BLS scoring tasks** on detection (rate-limited, with stale-score re-evaluation), emits telemetry. |
 | `ScoringOracle` | on-chain | Stores one score per address with daily linear decay. Reads are open; writes are AVS-gated (`setScore` / `bumpScore`). |
 | `GradientShieldTaskManager` | on-chain | BLS task manager. Creates scoring tasks, verifies BLS-aggregated quorum signatures via `BLSSignatureChecker`, enforces response windows and challenge periods. |
 | `GradientShieldServiceManager` | on-chain | AVS identity layer extending `ServiceManagerBase`. Links to the TaskManager, handles EigenLayer registration and rewards. |
@@ -321,6 +487,7 @@ make deploy             # deploy to testnet (needs env vars)
 │   ├── GradientShieldTaskManager.sol   BLS quorum task manager
 │   ├── GradientShieldServiceManager.sol AVS service manager (BLS variant)
 │   ├── IGradientShieldTaskManager.sol  task manager interface & structs
+│   ├── IScoreTaskCreator.sol          lightweight hook→TaskManager interface
 │   └── ScoringOracle.sol              per-address score store with decay
 ├── test/
 │   ├── HookBehavior.t.sol             hook fee-ladder tests

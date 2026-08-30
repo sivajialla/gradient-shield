@@ -54,11 +54,13 @@ contract GradientShieldTaskManager is
     uint32 public latestTaskNum;
     address public aggregator;
     address public generator;
+    address public hookAddress;
     ScoringOracle public oracle;
 
     mapping(uint32 => bytes32) public allTaskHashes;
     mapping(uint32 => bytes32) public allTaskResponses;
     mapping(uint32 => bool) public taskSuccesfullyChallenged;
+    mapping(address => uint32) public latestTaskForSubject;
 
     // -----------------------------------------------------------------
     // Modifiers
@@ -69,8 +71,8 @@ contract GradientShieldTaskManager is
         _;
     }
 
-    modifier onlyGenerator() {
-        if (msg.sender != generator) revert NotGenerator();
+    modifier onlyTaskCreator() {
+        if (msg.sender != generator && msg.sender != hookAddress) revert NotGenerator();
         _;
     }
 
@@ -104,6 +106,14 @@ contract GradientShieldTaskManager is
     }
 
     // -----------------------------------------------------------------
+    // Admin
+    // -----------------------------------------------------------------
+
+    function setHookAddress(address _hook) external onlyOwner {
+        hookAddress = _hook;
+    }
+
+    // -----------------------------------------------------------------
     // Task lifecycle
     // -----------------------------------------------------------------
 
@@ -116,7 +126,7 @@ contract GradientShieldTaskManager is
         uint256 toBlock,
         uint32 quorumThresholdPercentage,
         bytes calldata quorumNumbers
-    ) external onlyGenerator whenNotPaused {
+    ) external onlyTaskCreator whenNotPaused {
         ScoreTask memory task = ScoreTask({
             subject: subject,
             fromBlock: fromBlock,
@@ -127,6 +137,7 @@ contract GradientShieldTaskManager is
         });
 
         allTaskHashes[latestTaskNum] = keccak256(abi.encode(task));
+        latestTaskForSubject[subject] = latestTaskNum;
         emit ScoreTaskCreated(latestTaskNum, task);
         latestTaskNum++;
     }

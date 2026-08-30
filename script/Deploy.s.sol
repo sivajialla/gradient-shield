@@ -18,6 +18,7 @@ import {IPauserRegistry} from "eigenlayer-contracts/src/contracts/interfaces/IPa
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
 import {GradientShieldHook} from "../src/GradientShieldHook.sol";
+import {IScoreTaskCreator} from "../src/IScoreTaskCreator.sol";
 import {GradientShieldServiceManager} from "../src/GradientShieldServiceManager.sol";
 import {GradientShieldTaskManager} from "../src/GradientShieldTaskManager.sol";
 import {IGradientShieldTaskManager} from "../src/IGradientShieldTaskManager.sol";
@@ -41,15 +42,15 @@ contract Deploy is Script {
 
         vm.startBroadcast(pk);
 
-        (ScoringOracle oracle,) = _deployAVS(deployer);
-        _deployHook(oracle);
+        (ScoringOracle oracle, GradientShieldTaskManager tm) = _deployAVS(deployer);
+        _deployHook(oracle, tm);
 
         vm.stopBroadcast();
     }
 
     function _deployAVS(address deployer)
         internal
-        returns (ScoringOracle oracle, GradientShieldServiceManager sm)
+        returns (ScoringOracle oracle, GradientShieldTaskManager tm)
     {
         oracle = new ScoringOracle(address(0));
         console2.log("ScoringOracle:", address(oracle));
@@ -70,7 +71,7 @@ contract Deploy is Script {
                 (deployer, vm.envAddress("AGGREGATOR"), vm.envAddress("GENERATOR"), oracle)
             )
         );
-        GradientShieldTaskManager tm = GradientShieldTaskManager(address(tmProxy));
+        tm = GradientShieldTaskManager(address(tmProxy));
         console2.log("TaskManager (proxy):", address(tm));
 
         // Deploy ServiceManager (AVS identity layer)
@@ -90,25 +91,31 @@ contract Deploy is Script {
                 (deployer, deployer, IGradientShieldTaskManager(address(tm)))
             )
         );
-        sm = GradientShieldServiceManager(address(smProxy));
-        console2.log("ServiceManager (proxy):", address(sm));
+        console2.log("ServiceManager (proxy):", address(smProxy));
 
         oracle.setAvs(address(tm));
     }
 
-    function _deployHook(ScoringOracle oracle) internal {
+    function _deployHook(ScoringOracle oracle, GradientShieldTaskManager tm) internal {
         address poolManager = vm.envAddress("POOL_MANAGER");
 
         uint160 flags = uint160(
             Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG
         );
 
-        bytes memory constructorArgs = abi.encode(IPoolManager(poolManager), oracle);
+        bytes memory constructorArgs = abi.encode(
+            IPoolManager(poolManager), oracle, IScoreTaskCreator(address(tm))
+        );
         (address hookAddress, bytes32 salt) =
             HookMiner.find(CREATE2_DEPLOYER, flags, type(GradientShieldHook).creationCode, constructorArgs);
 
-        GradientShieldHook hook = new GradientShieldHook{salt: salt}(IPoolManager(poolManager), oracle);
+        GradientShieldHook hook = new GradientShieldHook{salt: salt}(
+            IPoolManager(poolManager), oracle, IScoreTaskCreator(address(tm))
+        );
         require(address(hook) == hookAddress, "Deploy: hook address mismatch");
         console2.log("GradientShieldHook:", address(hook));
+
+        tm.setHookAddress(address(hook));
+        console2.log("Hook registered as task creator on TaskManager");
     }
 }

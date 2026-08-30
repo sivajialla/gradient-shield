@@ -78,6 +78,9 @@ interface IGradientShieldTaskManager {
         BN254.G1Point[] memory pubkeysOfNonSigningOperators
     ) external;
 
+    function setHookAddress(address _hook) external;
+
     function taskNumber() external view returns (uint32);
     function getTaskResponseWindowBlock() external view returns (uint32);
+    function latestTaskForSubject(address subject) external view returns (uint32);
 }

@@ -32,7 +32,7 @@ contract DemoSimulationTest is Test {
     uint16 internal constant SUSPICIOUS_THRESHOLD = 40;
     uint16 internal constant REJECT_THRESHOLD = 80;
     uint24 internal constant BASE_FEE = 3000;
-    uint24 internal constant ESCALATION_MULTIPLIER = 3;
+    uint24 internal constant MAX_ESCALATED_FEE = 15000;
 
     function setUp() public {
         address mockRC = address(0xC0C0);
@@ -98,7 +98,7 @@ contract DemoSimulationTest is Test {
         console2.log("  Band:     ", band);
         console2.log("  Fee (pips):", fee);
         assertEq(score, 40);
-        assertEq(fee, BASE_FEE * ESCALATION_MULTIPLIER);
+        assertEq(fee, BASE_FEE); // score=40 is bottom of curve → BASE_FEE
 
         console2.log("");
         console2.log("  Day 4: No further bad activity, score decaying...");
@@ -142,9 +142,10 @@ contract DemoSimulationTest is Test {
         console2.log("  Score:    ", score);
         console2.log("  Band:     ", band);
         console2.log("  Fee (pips):", fee);
-        console2.log("  Result:    Swap allowed but at 3x fee");
+        // Continuous curve: fee = 3000 + 12000 * 15/40 = 7500
+        console2.log("  Result:    Swap allowed at escalated fee");
         assertEq(score, 55);
-        assertEq(fee, BASE_FEE * ESCALATION_MULTIPLIER);
+        assertEq(fee, 7500);
 
         console2.log("");
         console2.log("  Round 2 (1 day later): Bot keeps sandwiching, quorum bumps");
@@ -199,14 +200,15 @@ contract DemoSimulationTest is Test {
         assertTrue(score >= REJECT_THRESHOLD);
 
         console2.log("");
-        console2.log("  Day 2: Score decays to 75 - now allowed at 3x fee");
+        console2.log("  Day 2: Score decays to 75 - now allowed at escalated fee");
         vm.warp(block.timestamp + 1 days);
         score = oracle.getScore(REFORMED_BOT);
         (, uint24 fee) = _feeDecision(score);
         console2.log("  Score:    ", score);
         console2.log("  Fee (pips):", fee);
         assertEq(score, 75);
-        assertEq(fee, BASE_FEE * ESCALATION_MULTIPLIER);
+        // Continuous curve: fee = 3000 + 12000 * 35/40 = 13500
+        assertEq(fee, 13500);
 
         console2.log("");
         console2.log("  Day 9: Score decays to 40 - border of suspicious");
@@ -314,7 +316,10 @@ contract DemoSimulationTest is Test {
         if (score >= REJECT_THRESHOLD) {
             return ("REJECTED", 0);
         } else if (score >= SUSPICIOUS_THRESHOLD) {
-            return ("SUSPICIOUS", BASE_FEE * ESCALATION_MULTIPLIER);
+            uint24 range = uint24(REJECT_THRESHOLD - SUSPICIOUS_THRESHOLD);
+            uint24 position = uint24(score - SUSPICIOUS_THRESHOLD);
+            fee = BASE_FEE + (MAX_ESCALATED_FEE - BASE_FEE) * position / range;
+            return ("SUSPICIOUS", fee);
         } else {
             return ("CLEAN", BASE_FEE);
         }

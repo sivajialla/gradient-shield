@@ -20,6 +20,7 @@ import {CustomRevert} from "@uniswap/v4-core/src/libraries/CustomRevert.sol";
 
 import {GradientShieldHook} from "../src/GradientShieldHook.sol";
 import {ScoringOracle} from "../src/ScoringOracle.sol";
+import {IScoreTaskCreator} from "../src/IScoreTaskCreator.sol";
 
 contract MEVAttackDefenseTest is Test, Deployers {
     using PoolIdLibrary for PoolKey;
@@ -46,9 +47,11 @@ contract MEVAttackDefenseTest is Test, Deployers {
             address(this),
             flags,
             type(GradientShieldHook).creationCode,
-            abi.encode(manager, oracle)
+            abi.encode(manager, oracle, IScoreTaskCreator(address(0)))
         );
-        hook = new GradientShieldHook{salt: salt}(IPoolManager(manager), oracle);
+        hook = new GradientShieldHook{salt: salt}(
+            IPoolManager(manager), oracle, IScoreTaskCreator(address(0))
+        );
         require(address(hook) == hookAddr, "hook address mismatch");
 
         deployMintAndApprove2Currencies();

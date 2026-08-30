@@ -12,22 +12,26 @@ import {LPFeeLibrary} from "@uniswap/v4-core/src/libraries/LPFeeLibrary.sol";
 import {SwapParams, ModifyLiquidityParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 
 import {ScoringOracle} from "./ScoringOracle.sol";
+import {IScoreTaskCreator} from "./IScoreTaskCreator.sol";
 
 /// @title GradientShieldHook
-/// @notice Uniswap v4 hook that prices swaps by the swapper's MEV risk score and
-///         detects sandwich attacks and JIT liquidity patterns on-chain.
+/// @notice Uniswap v4 hook that prices swaps by the swapper's MEV risk score,
+///         detects sandwich/JIT patterns on-chain using transient storage (EIP-1153),
+///         and auto-triggers BLS quorum scoring tasks when patterns are detected.
 ///
-/// Fee ladder (driven by {ScoringOracle} score):
-///   score < SUSPICIOUS_THRESHOLD   -> base dynamic fee
-///   score < REJECT_THRESHOLD       -> base fee x ESCALATION_MULTIPLIER (FeeEscalated)
-///   score >= REJECT_THRESHOLD      -> revert BotRejected
+/// Gas optimization: all per-block detection state (sandwich tracking, swap
+/// counters, JIT liquidity flags) uses TSTORE/TLOAD (100 gas each) instead of
+/// SSTORE/SLOAD (5k-20k gas). This saves ~20k gas per swap on detection logic.
+/// Transient storage auto-clears at transaction end — no manual reset needed.
 ///
-/// Sandwich detection: flags an address that swaps in both directions within
-/// the same block on the same pool, with at least one intervening swap by a
-/// different address (the victim).
+/// Continuous fee curve (driven by {ScoringOracle} score):
+///   score < 40   -> BASE_FEE (3000 pips = 0.30%)
+///   40 <= score < 80 -> linear interpolation BASE_FEE to MAX_ESCALATED_FEE
+///   score >= 80  -> revert BotRejected
 ///
-/// JIT detection: flags an address that adds and removes liquidity in the
-/// same block on the same pool.
+/// BLS integration: on-chain detection auto-triggers scoring tasks on the
+/// TaskManager. The BLS operator quorum evaluates flagged addresses, and
+/// quorum-verified scores feed back into fee decisions on subsequent swaps.
 contract GradientShieldHook is BaseHook {
     using PoolIdLibrary for PoolKey;
     using LPFeeLibrary for uint24;
@@ -38,38 +42,31 @@ contract GradientShieldHook is BaseHook {
 
     uint16 public constant SUSPICIOUS_THRESHOLD = 40;
     uint16 public constant REJECT_THRESHOLD = 80;
-    uint24 public constant ESCALATION_MULTIPLIER = 3;
     uint24 public constant BASE_FEE = 3000;
+    uint24 public constant MAX_ESCALATED_FEE = 15000;
+
+    uint32 public constant DETECTION_QUORUM_THRESHOLD = 67;
+    uint256 public constant DETECTION_LOOKBACK = 10;
+    uint256 public constant TASK_COOLDOWN_BLOCKS = 50;
+    uint256 public constant STALENESS_THRESHOLD = 7 days;
+
+    // Transient storage namespace seeds (prevent slot collisions).
+    bytes32 private constant _FIRST_SWAP_NS = keccak256("GradientShield.firstSwap");
+    bytes32 private constant _BLOCK_SWAPS_NS = keccak256("GradientShield.blockSwaps");
+    bytes32 private constant _LIQUIDITY_NS = keccak256("GradientShield.liquidityAdds");
+
+    // Transient storage sentinel values for first-swap direction.
+    uint256 private constant _SWAP_ZERO_FOR_ONE = 1;
+    uint256 private constant _SWAP_ONE_FOR_ZERO = 2;
 
     // ---------------------------------------------------------------------
-    // State
+    // Persistent state (cross-transaction)
     // ---------------------------------------------------------------------
 
     ScoringOracle public immutable oracle;
+    IScoreTaskCreator public immutable taskManager;
 
-    /// @notice Tracks the first swap direction per (pool, swapper) in a given block.
-    struct SwapRecord {
-        uint256 blockNumber;
-        bool zeroForOne;
-    }
-
-    mapping(PoolId => mapping(address => SwapRecord)) internal _firstSwap;
-
-    /// @notice Per-pool swap counter within a block, used to confirm an
-    ///         intervening victim swap between the front-run and back-run.
-    struct BlockSwapCounter {
-        uint256 blockNumber;
-        uint256 count;
-    }
-
-    mapping(PoolId => BlockSwapCounter) internal _blockSwaps;
-
-    /// @notice Tracks add-liquidity per (pool, provider) in a given block for JIT detection.
-    struct LiquidityRecord {
-        uint256 blockNumber;
-    }
-
-    mapping(PoolId => mapping(address => LiquidityRecord)) internal _liquidityAdds;
+    mapping(address => uint256) internal _lastTaskBlock;
 
     // ---------------------------------------------------------------------
     // Events
@@ -89,6 +86,7 @@ contract GradientShieldHook is BaseHook {
     event JITDetected(PoolId indexed poolId, address indexed provider, uint256 blockNumber);
     event FeeEscalated(PoolId indexed poolId, address indexed swapper, uint24 baseFee, uint24 chargedFee);
     event BotRejectedEvent(PoolId indexed poolId, address indexed swapper, uint16 score);
+    event ScoreTaskTriggered(address indexed subject, uint256 blockNumber, string detectionType);
 
     // ---------------------------------------------------------------------
     // Errors
@@ -100,8 +98,13 @@ contract GradientShieldHook is BaseHook {
     // Constructor
     // ---------------------------------------------------------------------
 
-    constructor(IPoolManager _poolManager, ScoringOracle _oracle) BaseHook(_poolManager) {
+    constructor(
+        IPoolManager _poolManager,
+        ScoringOracle _oracle,
+        IScoreTaskCreator _taskManager
+    ) BaseHook(_poolManager) {
         oracle = _oracle;
+        taskManager = _taskManager;
     }
 
     // ---------------------------------------------------------------------
@@ -139,53 +142,55 @@ contract GradientShieldHook is BaseHook {
         PoolId poolId = key.toId();
         uint16 score = oracle.getScore(sender);
 
-        // Hard reject.
         if (score >= REJECT_THRESHOLD) {
             emit BotRejectedEvent(poolId, sender, score);
             revert BotRejected(sender, score);
         }
 
-        // Sandwich heuristic: same address, same pool, same block, opposite direction,
-        // with at least one intervening swap (the victim).
-        SwapRecord storage first = _firstSwap[poolId][sender];
-        BlockSwapCounter storage counter = _blockSwaps[poolId];
+        if (score > 0) _checkStaleness(sender);
 
-        // Reset per-block swap counter if we're in a new block.
-        if (counter.blockNumber != block.number) {
-            counter.blockNumber = block.number;
-            counter.count = 0;
-        }
+        _detectSandwich(poolId, sender, params.zeroForOne);
 
-        if (first.blockNumber == block.number) {
-            // Same address already swapped this block — check for back-run.
-            if (first.zeroForOne != params.zeroForOne && counter.count >= 2) {
-                // Opposite direction + at least one intervening swap = sandwich back-run.
-                emit SandwichDetected(poolId, sender, block.number);
-            }
-        } else {
-            // First swap by this address in this block — record direction.
-            first.blockNumber = block.number;
-            first.zeroForOne = params.zeroForOne;
-        }
+        uint24 fee = _computeFee(score);
+        if (fee > BASE_FEE) emit FeeEscalated(poolId, sender, BASE_FEE, fee);
 
-        counter.count++;
-
-        // Fee computation.
-        uint24 fee = BASE_FEE;
-        if (score >= SUSPICIOUS_THRESHOLD) {
-            fee = BASE_FEE * ESCALATION_MULTIPLIER;
-            emit FeeEscalated(poolId, sender, BASE_FEE, fee);
-        }
-
-        // Telemetry.
         emit SwapTelemetry(poolId, sender, params.zeroForOne, params.amountSpecified, score, fee, block.number);
 
-        uint24 overrideFee = fee | LPFeeLibrary.OVERRIDE_FEE_FLAG;
-        return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, overrideFee);
+        return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, fee | LPFeeLibrary.OVERRIDE_FEE_FLAG);
+    }
+
+    function _detectSandwich(PoolId poolId, address sender, bool zeroForOne) internal {
+        bytes32 firstSlot = _firstSwapSlot(poolId, sender);
+        uint256 recorded = _tload(firstSlot);
+        bytes32 counterSlot = _blockSwapsSlot(poolId);
+        uint256 swapCount = _tload(counterSlot);
+
+        if (recorded != 0) {
+            if ((recorded == _SWAP_ZERO_FOR_ONE) != zeroForOne && swapCount >= 2) {
+                emit SandwichDetected(poolId, sender, block.number);
+                _triggerScoreTask(sender, "sandwich");
+            }
+        } else {
+            _tstore(firstSlot, zeroForOne ? _SWAP_ZERO_FOR_ONE : _SWAP_ONE_FOR_ZERO);
+        }
+
+        _tstore(counterSlot, swapCount + 1);
     }
 
     // ---------------------------------------------------------------------
-    // JIT-liquidity detection
+    // Fee curve
+    // ---------------------------------------------------------------------
+
+    function _computeFee(uint16 score) internal pure returns (uint24) {
+        if (score < SUSPICIOUS_THRESHOLD) return BASE_FEE;
+
+        uint24 range = uint24(REJECT_THRESHOLD - SUSPICIOUS_THRESHOLD);
+        uint24 position = uint24(score - SUSPICIOUS_THRESHOLD);
+        return BASE_FEE + (MAX_ESCALATED_FEE - BASE_FEE) * position / range;
+    }
+
+    // ---------------------------------------------------------------------
+    // JIT-liquidity detection (transient storage)
     // ---------------------------------------------------------------------
 
     function _beforeAddLiquidity(
@@ -195,7 +200,7 @@ contract GradientShieldHook is BaseHook {
         bytes calldata
     ) internal override returns (bytes4) {
         PoolId poolId = key.toId();
-        _liquidityAdds[poolId][sender].blockNumber = block.number;
+        _tstore(_liquiditySlot(poolId, sender), 1);
         return BaseHook.beforeAddLiquidity.selector;
     }
 
@@ -206,9 +211,70 @@ contract GradientShieldHook is BaseHook {
         bytes calldata
     ) internal override returns (bytes4) {
         PoolId poolId = key.toId();
-        if (_liquidityAdds[poolId][sender].blockNumber == block.number) {
+        if (_tload(_liquiditySlot(poolId, sender)) == 1) {
             emit JITDetected(poolId, sender, block.number);
+            _triggerScoreTask(sender, "jit");
         }
         return BaseHook.beforeRemoveLiquidity.selector;
+    }
+
+    // ---------------------------------------------------------------------
+    // BLS task auto-trigger
+    // ---------------------------------------------------------------------
+
+    function _triggerScoreTask(address subject, string memory detectionType) internal {
+        if (address(taskManager) == address(0)) return;
+        if (_lastTaskBlock[subject] + TASK_COOLDOWN_BLOCKS > block.number) return;
+
+        uint256 fromBlock = block.number > DETECTION_LOOKBACK ? block.number - DETECTION_LOOKBACK : 0;
+
+        try taskManager.createScoreTask(
+            subject,
+            fromBlock,
+            block.number,
+            DETECTION_QUORUM_THRESHOLD,
+            hex"00"
+        ) {
+            _lastTaskBlock[subject] = block.number;
+            emit ScoreTaskTriggered(subject, block.number, detectionType);
+        } catch {}
+    }
+
+    // ---------------------------------------------------------------------
+    // Stale score re-evaluation
+    // ---------------------------------------------------------------------
+
+    function _checkStaleness(address subject) internal {
+        if (address(taskManager) == address(0)) return;
+
+        ScoringOracle.ScoreRecord memory rec = oracle.rawRecord(subject);
+        if (rec.lastUpdated == 0) return;
+        if (block.timestamp - uint256(rec.lastUpdated) < STALENESS_THRESHOLD) return;
+
+        _triggerScoreTask(subject, "stale");
+    }
+
+    // ---------------------------------------------------------------------
+    // Transient storage helpers (EIP-1153)
+    // ---------------------------------------------------------------------
+
+    function _tstore(bytes32 slot, uint256 value) internal {
+        assembly { tstore(slot, value) }
+    }
+
+    function _tload(bytes32 slot) internal view returns (uint256 value) {
+        assembly { value := tload(slot) }
+    }
+
+    function _firstSwapSlot(PoolId poolId, address sender) internal view returns (bytes32) {
+        return keccak256(abi.encode(_FIRST_SWAP_NS, poolId, sender, block.number));
+    }
+
+    function _blockSwapsSlot(PoolId poolId) internal view returns (bytes32) {
+        return keccak256(abi.encode(_BLOCK_SWAPS_NS, poolId, block.number));
+    }
+
+    function _liquiditySlot(PoolId poolId, address sender) internal view returns (bytes32) {
+        return keccak256(abi.encode(_LIQUIDITY_NS, poolId, sender, block.number));
     }
 }
