@@ -25,7 +25,7 @@ penalized:
 
 | Layer | When it acts | What it does |
 |:-----:|:------------:|--------------|
-| **1. Sender Impact Cap** | Same block (first trade) | Limits any single sender to **5 ETH** of volume per pool per block. The back-run leg of a sandwich reverts with `SenderImpactExceeded` when cumulative volume exceeds the cap. |
+| **1. Sender Volume Fees** | Same block (first trade) | Tracks per-sender volume per pool per block. Past **5 ETH** the fee escalates: 1.50% (5-10 ETH), 3.00% (10-20 ETH), 5.00% (20+ ETH) — making the back-run progressively unprofitable while keeping the system **fully permissionless**. |
 | **2. Pool Impact Guard** | Same block (first trade) | Tracks cumulative volume across all senders per pool per block. When total volume exceeds **10 ETH**, subsequent swaps pay a **1.50% penalty fee**, making the back-run unprofitable. |
 | **3. Sandwich/JIT Detection** | Same block | Uses **transient storage (EIP-1153)** to detect same-block buy→victim→sell patterns and same-block add→swap→remove JIT liquidity. Emits detection events and auto-triggers AVS scoring tasks. |
 | **4. Continuous Fee Curve** | Every swap | Maps the sender's **0-100 risk score** onto a fee: clean (0-39) pays 0.30%, suspicious (40-79) pays up to 1.50%, confirmed toxic (80+) is rejected outright. |
@@ -41,11 +41,11 @@ fees and eventual rejection.
 
 ```
 Block N:
-  1. Bot front-runs: buys 4 ETH of token → cumulative = 4 ETH
-     Hook sets _pendingScoreFlag (4 ETH > 50% of 5 ETH cap)
+  1. Bot front-runs: buys 4 ETH of token → cumulative = 4 ETH (base fee)
   2. Victim swaps: normal trade proceeds at base fee
-  3. Bot back-runs: tries to sell 4 ETH → cumulative = 8 ETH > 5 ETH cap
-     → REVERTS with SenderImpactExceeded
+  3. Bot back-runs: sells 4 ETH → cumulative = 8 ETH > 5 ETH threshold
+     → pays 1.50% fee (tier 1) — eats most of the sandwich profit
+     → SenderImpactCapped event emitted, _pendingScoreFlag set
 
 Block N+1:
   4. Bot tries any swap → hook sees _pendingScoreFlag is set
@@ -71,7 +71,7 @@ flowchart LR
         D -->|"uint16"| C
 
         C --> E{Defense layers}
-        E -->|"Impact cap\nexceeded"| X["REVERT\nSenderImpactExceeded"]
+        E -->|"Volume > 5 ETH"| X["Escalated fee\n1.50% → 5.00%"]
         E -->|"Score 80+"| H["REVERT\nBotRejected"]
         E -->|"Score 0-39"| F["Base fee\n0.30%"]
         E -->|"Score 40-79"| G["Escalated fee\n0.30% → 1.50%"]
@@ -135,8 +135,9 @@ sequenceDiagram
     alt _pendingScoreFlag set from prior block
         Hook->>TM: createScoreTask(sender, "impact")
     end
-    alt sender cumulative > SENDER_IMPACT_CAP
-        Hook--xPM: revert SenderImpactExceeded
+    alt sender cumulative > SENDER_VOLUME_THRESHOLD
+        Hook->>Hook: escalate fee (1.50% → 3.00% → 5.00%)
+        Hook->>Hook: emit SenderImpactCapped
     end
     alt pool cumulative > POOL_IMPACT_THRESHOLD
         Hook->>Hook: penaltyFee = max(scoreFee, 15000)
@@ -182,12 +183,21 @@ fee = BASE_FEE + (MAX_ESCALATED_FEE - BASE_FEE) × (score - 40) / (80 - 40)
 These guards use **transient storage** and act on the very first trade — no
 reputation history needed.
 
-### Sender impact cap
+### Sender volume progressive fees
 
-- **Constant:** `SENDER_IMPACT_CAP = 5 ether`
+- **Constant:** `SENDER_VOLUME_THRESHOLD = 5 ether`
 - Tracks cumulative `abs(amountSpecified)` per sender per pool per block
-- **Reverts** with `SenderImpactExceeded` when exceeded
-- Prevents the back-run leg of a sandwich from executing
+- **Never reverts** — the system is fully permissionless, anyone can trade any amount
+- Instead, fees escalate progressively:
+
+| Cumulative Volume | Fee Tier | Fee |
+|:-:|:-:|:-:|
+| 0 – 5 ETH | Base | 0.30% |
+| 5 – 10 ETH | Tier 1 | 1.50% |
+| 10 – 20 ETH | Tier 2 | 3.00% |
+| 20+ ETH | Tier 3 | 5.00% |
+
+- Makes the back-run leg of a sandwich progressively unprofitable
 - Independent per sender — one sender's volume doesn't affect another's
 - Resets automatically each block (transient storage)
 
@@ -195,17 +205,17 @@ reputation history needed.
 
 - **Constant:** `POOL_IMPACT_THRESHOLD = 10 ether`
 - Tracks cumulative volume across *all* senders per pool per block
-- When exceeded, subsequent swaps pay `IMPACT_PENALTY_FEE` (15000 pips = 1.50%)
+- When exceeded, subsequent swaps pay `IMPACT_FEE_TIER1` (15000 pips = 1.50%)
 - Does not revert — applies a penalty fee instead
 - Makes large-volume manipulation unprofitable even when split across addresses
 
 ### Pending score flag (`_pendingScoreFlag`)
 
-When a sender uses >50% of the impact cap in a single block, the hook sets a
+When a sender exceeds the volume threshold in a single block, the hook sets a
 persistent flag. On the sender's *next successful swap* (even in a future block),
 the hook auto-triggers an AVS scoring task before clearing the flag. This
-bridges the gap between the immediate revert (which rolls back all state) and
-the asynchronous AVS scoring pipeline.
+bridges the gap between the immediate fee escalation and the asynchronous AVS
+scoring pipeline.
 
 ---
 

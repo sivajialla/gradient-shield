@@ -70,12 +70,20 @@ contract GradientShieldHook is BaseHook, IUnlockCallback {
     // making the back-run leg of a sandwich unprofitable.
     uint256 public constant POOL_IMPACT_THRESHOLD = 10 ether;
 
-    // Per-sender impact cap: max abs(amountSpecified) any single sender can
-    // push through a pool in one block. Prevents the back-run leg of a sandwich.
-    uint256 public constant SENDER_IMPACT_CAP = 5 ether;
+    // Per-sender volume threshold: when a single sender's cumulative volume
+    // in one pool in one block exceeds this, a progressive penalty fee applies.
+    // No revert — the system is fully permissionless.
+    uint256 public constant SENDER_VOLUME_THRESHOLD = 5 ether;
 
-    // Penalty fee applied when impact guards trigger (1.50% = 15000 pips).
-    uint24 public constant IMPACT_PENALTY_FEE = 15000;
+    // Progressive fee tiers (pips). As sender volume grows within a block,
+    // the fee escalates, making sandwich back-runs increasingly unprofitable.
+    //   0 – SENDER_VOLUME_THRESHOLD:   base fee (3000 pips = 0.30%)
+    //   1x – 2x threshold:             15000 pips (1.50%)
+    //   2x – 4x threshold:             30000 pips (3.00%)
+    //   > 4x threshold:                50000 pips (5.00%)
+    uint24 public constant IMPACT_FEE_TIER1 = 15000;
+    uint24 public constant IMPACT_FEE_TIER2 = 30000;
+    uint24 public constant IMPACT_FEE_TIER3 = 50000;
 
     // Transient storage namespace seeds (prevent slot collisions).
     bytes32 private constant _FIRST_SWAP_NS = keccak256("GradientShield.firstSwap");
@@ -126,7 +134,6 @@ contract GradientShieldHook is BaseHook, IUnlockCallback {
     // ---------------------------------------------------------------------
 
     error BotRejected(address swapper, uint16 score);
-    error SenderImpactExceeded(address sender, uint256 impact, uint256 cap);
     error DeadlineExpired();
 
     // ---------------------------------------------------------------------
@@ -316,42 +323,43 @@ contract GradientShieldHook is BaseHook, IUnlockCallback {
     function _applyImpactGuards(PoolId poolId, address sender, uint256 swapSize) internal returns (uint24) {
         uint24 fee = BASE_FEE;
 
-        // Check if this sender was flagged from a previous block's high-volume
-        // activity. If so, trigger a scoring task now (this swap succeeds,
-        // so the task persists).
         if (_pendingScoreFlag[sender]) {
             _pendingScoreFlag[sender] = false;
-            _triggerScoreTask(sender, "impact_cap_prior");
+            _triggerScoreTask(sender, "impact_prior");
         }
 
-        // Guard 5: Per-sender impact cap — revert if one sender pushes too
-        // much volume through a single pool in one block.
+        // Per-sender progressive fee: as a sender's cumulative volume in
+        // one pool in one block grows, the fee escalates. Fully permissionless
+        // — no reverts, any amount is tradeable. Sandwich back-runs become
+        // unprofitable because the fee eats the extracted value.
         bytes32 senderSlot = _senderImpactSlot(poolId, sender);
         uint256 senderCumulative = _tload(senderSlot) + swapSize;
-        if (senderCumulative > SENDER_IMPACT_CAP) {
-            emit SenderImpactCapped(poolId, sender, senderCumulative, IMPACT_PENALTY_FEE);
-            revert SenderImpactExceeded(sender, senderCumulative, SENDER_IMPACT_CAP);
-        }
         _tstore(senderSlot, senderCumulative);
 
-        // Flag sender for scoring if they're using a high proportion of the
-        // cap in this block. This write persists even though the back-run
-        // might revert — because it's written on the SUCCESSFUL front-run,
-        // not the failed back-run. The scoring task triggers on their next
-        // successful swap.
-        if (senderCumulative > SENDER_IMPACT_CAP / 2) {
-            _pendingScoreFlag[sender] = true;
+        uint24 senderFee = BASE_FEE;
+        if (senderCumulative > SENDER_VOLUME_THRESHOLD * 4) {
+            senderFee = IMPACT_FEE_TIER3;
+        } else if (senderCumulative > SENDER_VOLUME_THRESHOLD * 2) {
+            senderFee = IMPACT_FEE_TIER2;
+        } else if (senderCumulative > SENDER_VOLUME_THRESHOLD) {
+            senderFee = IMPACT_FEE_TIER1;
         }
 
-        // Guard 2: Pool-level price impact — if cumulative volume this block
-        // exceeds the threshold, escalate the fee. This makes the back-run
-        // leg of a sandwich expensive.
+        if (senderFee > BASE_FEE) {
+            emit SenderImpactCapped(poolId, sender, senderCumulative, senderFee);
+            _pendingScoreFlag[sender] = true;
+            fee = senderFee;
+        }
+
+        // Pool-level guard: if cumulative volume across all senders exceeds
+        // the threshold, escalate the fee.
         bytes32 poolSlot = _poolImpactSlot(poolId);
         uint256 poolCumulative = _tload(poolSlot) + swapSize;
         _tstore(poolSlot, poolCumulative);
 
         if (poolCumulative > POOL_IMPACT_THRESHOLD) {
-            fee = IMPACT_PENALTY_FEE;
+            uint24 poolFee = IMPACT_FEE_TIER1;
+            if (poolFee > fee) fee = poolFee;
             emit PoolImpactGuard(poolId, sender, poolCumulative, fee);
         }
 

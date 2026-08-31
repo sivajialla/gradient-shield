@@ -24,8 +24,8 @@ import {IScoreTaskCreator} from "../src/IScoreTaskCreator.sol";
 
 /// @title Impact Guard Tests
 /// @notice Tests for same-block price impact guard (approach 2)
-///         and per-sender impact cap (approach 5) that make
-///         sandwich back-runs expensive or impossible.
+///         and per-sender progressive fees (approach 5) that make
+///         sandwich back-runs progressively more expensive.
 contract ImpactGuardTest is Test, Deployers {
     using PoolIdLibrary for PoolKey;
 
@@ -109,58 +109,136 @@ contract ImpactGuardTest is Test, Deployers {
     }
 
     // =====================================================================
-    //  SENDER IMPACT CAP (Approach 5)
+    //  SENDER VOLUME PROGRESSIVE FEES (Approach 5 — permissionless)
     // =====================================================================
 
-    function test_senderImpactCap_smallSwapPasses() public {
+    function test_senderVolume_smallSwapBasesFee() public {
         _swapAs(user1, user1Router, true, -1 ether);
     }
 
-    function test_senderImpactCap_atCapPasses() public {
+    function test_senderVolume_atThresholdBasesFee() public {
         _swapAs(user1, user1Router, true, -5 ether);
     }
 
-    function test_senderImpactCap_exceedsCapReverts() public {
+    function test_senderVolume_exceedsThresholdEscalatesFee() public {
         _swapAs(bot, botRouter, true, -4 ether);
 
-        // Second swap pushes sender total to 6 ether > 5 ether cap
-        vm.expectRevert();
+        vm.recordLogs();
         _swapAs(bot, botRouter, true, -2 ether);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bytes32 capSig = keccak256("SenderImpactCapped(bytes32,address,uint256,uint24)");
+        bool found = false;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] == capSig) {
+                (uint256 cumulative, uint24 fee) = abi.decode(logs[i].data, (uint256, uint24));
+                assertEq(cumulative, 6 ether);
+                assertEq(fee, 15000, "tier1 fee for 5-10 ETH range");
+                found = true;
+            }
+        }
+        assertTrue(found, "SenderImpactCapped should emit with tier1 fee");
     }
 
-    function test_senderImpactCap_differentSendersIndependent() public {
+    function test_senderVolume_differentSendersIndependent() public {
         _swapAs(bot, botRouter, true, -4 ether);
         _swapAs(user1, user1Router, true, -4 ether);
         _swapAs(user2, user2Router, true, -4 ether);
     }
 
-    function test_senderImpactCap_resetsAcrossBlocks() public {
+    function test_senderVolume_resetsAcrossBlocks() public {
         _swapAs(bot, botRouter, true, -4 ether);
         vm.roll(block.number + 1);
-        // Cap reset — bot can swap 4 ether again
         _swapAs(bot, botRouter, true, -4 ether);
     }
 
-    function test_senderImpactCap_cumulativeAcrossDirections() public {
-        // 3 ether buy
+    function test_senderVolume_cumulativeAcrossDirections() public {
         _swapAs(bot, botRouter, true, -3 ether);
-        // 3 ether sell — sender total = 6 ether > 5 cap → reverts
-        // The cap counts absolute volume, so the back-run also counts
-        vm.expectRevert();
+
+        vm.recordLogs();
         _swapAs(bot, botRouter, false, -3 ether);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bytes32 capSig = keccak256("SenderImpactCapped(bytes32,address,uint256,uint24)");
+        bool found = false;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] == capSig) {
+                (uint256 cumulative, uint24 fee) = abi.decode(logs[i].data, (uint256, uint24));
+                assertEq(cumulative, 6 ether);
+                assertEq(fee, 15000, "tier1 fee for cumulative 6 ETH");
+                found = true;
+            }
+        }
+        assertTrue(found, "SenderImpactCapped should emit on cross-direction volume");
     }
 
-    function test_senderImpactCap_preventsFrontRun() public {
-        // 6 ether in one shot exceeds cap → blocked
-        vm.expectRevert();
+    function test_senderVolume_largeSwapGetsTier1Fee() public {
+        vm.recordLogs();
         _swapAs(bot, botRouter, true, -6 ether);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bytes32 capSig = keccak256("SenderImpactCapped(bytes32,address,uint256,uint24)");
+        bool found = false;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] == capSig) {
+                (uint256 cumulative, uint24 fee) = abi.decode(logs[i].data, (uint256, uint24));
+                assertEq(cumulative, 6 ether);
+                assertEq(fee, 15000);
+                found = true;
+            }
+        }
+        assertTrue(found, "6 ETH swap triggers tier1 fee");
     }
 
-    function test_senderImpactCap_exactlyAtCapThenOneMorReverts() public {
+    function test_senderVolume_aboveThresholdThenSmallEscalates() public {
         _swapAs(bot, botRouter, true, -5 ether);
-        // Even 1 wei more reverts
-        vm.expectRevert();
+
+        vm.recordLogs();
         _swapAs(bot, botRouter, true, -1);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bytes32 capSig = keccak256("SenderImpactCapped(bytes32,address,uint256,uint24)");
+        bool found = false;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] == capSig) {
+                found = true;
+            }
+        }
+        assertTrue(found, "even 1 wei past threshold triggers fee escalation");
+    }
+
+    function test_senderVolume_tier2Fee() public {
+        vm.recordLogs();
+        _swapAs(bot, botRouter, true, -11 ether);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bytes32 capSig = keccak256("SenderImpactCapped(bytes32,address,uint256,uint24)");
+        bool found = false;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] == capSig) {
+                (, uint24 fee) = abi.decode(logs[i].data, (uint256, uint24));
+                assertEq(fee, 30000, "tier2 fee for 10-20 ETH range");
+                found = true;
+            }
+        }
+        assertTrue(found, "11 ETH swap triggers tier2 fee");
+    }
+
+    function test_senderVolume_tier3Fee() public {
+        vm.recordLogs();
+        _swapAs(bot, botRouter, true, -21 ether);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bytes32 capSig = keccak256("SenderImpactCapped(bytes32,address,uint256,uint24)");
+        bool found = false;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] == capSig) {
+                (, uint24 fee) = abi.decode(logs[i].data, (uint256, uint24));
+                assertEq(fee, 50000, "tier3 fee for 20+ ETH range");
+                found = true;
+            }
+        }
+        assertTrue(found, "21 ETH swap triggers tier3 fee");
     }
 
     // =====================================================================
@@ -242,24 +320,43 @@ contract ImpactGuardTest is Test, Deployers {
     //  SANDWICH SCENARIOS
     // =====================================================================
 
-    function test_sandwich_backRunBlockedBySenderCap() public {
-        // Front-run: 3 ether
+    function test_sandwich_backRunPaysEscalatedFee() public {
         _swapAs(bot, botRouter, true, -3 ether);
-        // Victim
         _swapAs(user1, user1Router, true, -2 ether);
-        // Back-run: 3 ether → sender total = 6 > 5 cap → REVERTED
-        vm.expectRevert();
+
+        vm.recordLogs();
         _swapAs(bot, botRouter, false, -3 ether);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bytes32 capSig = keccak256("SenderImpactCapped(bytes32,address,uint256,uint24)");
+        bool found = false;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] == capSig) {
+                (uint256 cumulative, uint24 fee) = abi.decode(logs[i].data, (uint256, uint24));
+                assertEq(cumulative, 6 ether);
+                assertEq(fee, 15000, "back-run pays tier1 fee");
+                found = true;
+            }
+        }
+        assertTrue(found, "sandwich back-run triggers fee escalation");
     }
 
-    function test_sandwich_smallAmountsStillCapped() public {
-        // Front-run: 2.6 ether
+    function test_sandwich_smallAmountsStillEscalated() public {
         _swapAs(bot, botRouter, true, -2.6 ether);
-        // Victim
         _swapAs(user1, user1Router, true, -1 ether);
-        // Back-run: 2.6 ether → sender total = 5.2 > 5 cap
-        vm.expectRevert();
+
+        vm.recordLogs();
         _swapAs(bot, botRouter, false, -2.6 ether);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bytes32 capSig = keccak256("SenderImpactCapped(bytes32,address,uint256,uint24)");
+        bool found = false;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] == capSig) {
+                found = true;
+            }
+        }
+        assertTrue(found, "small sandwich still triggers fee escalation");
     }
 
     function test_sandwich_tinyBotPaysPoolPenalty() public {
@@ -292,20 +389,14 @@ contract ImpactGuardTest is Test, Deployers {
     }
 
     // =====================================================================
-    //  SCORING AFTER BLOCKED SANDWICH
+    //  SCORING AFTER ESCALATED SANDWICH
     // =====================================================================
 
-    function test_scoringTriggered_afterBlockedSandwich() public {
-        // Bot front-runs with > 50% of sender cap → gets flagged
-        _swapAs(bot, botRouter, true, -3 ether); // 3 > 2.5 (cap/2) → flagged
-
-        // Back-run reverts (cap exceeded)
+    function test_scoringTriggered_afterEscalatedSandwich() public {
+        _swapAs(bot, botRouter, true, -3 ether);
         _swapAs(user1, user1Router, true, -1 ether);
-        vm.expectRevert();
         _swapAs(bot, botRouter, false, -3 ether);
 
-        // Next block: bot tries any swap → flag is checked and scoring
-        // task is triggered via "impact_cap_prior" detection type
         vm.roll(block.number + 1);
 
         vm.recordLogs();
@@ -319,31 +410,20 @@ contract ImpactGuardTest is Test, Deployers {
                 taskTriggered = true;
             }
         }
-        // ScoreTaskTriggered won't emit because taskManager is address(0)
-        // in this test setup. But the _pendingScoreFlag was set and cleared.
-        // Verify the flag was consumed by checking that a second swap
-        // in the same block does NOT re-trigger.
     }
 
     function test_pendingFlag_setOnHighVolume() public {
-        // Swap > 50% of cap (2.5 ether) sets _pendingScoreFlag
-        _swapAs(bot, botRouter, true, -3 ether);
+        _swapAs(bot, botRouter, true, -6 ether);
 
-        // Next block: bot swaps again — flag triggers scoring check.
-        // With taskManager == address(0), _triggerScoreTask returns early,
-        // but the flag is cleared. Verify by doing two swaps in the new block:
-        // first clears the flag, second doesn't re-trigger.
         vm.roll(block.number + 1);
-        _swapAs(bot, botRouter, true, -1 ether); // clears flag
-        _swapAs(bot, botRouter, false, -1 ether); // no flag, no trigger
+        _swapAs(bot, botRouter, true, -1 ether);
+        _swapAs(bot, botRouter, false, -1 ether);
     }
 
     function test_pendingFlag_notSetOnSmallVolume() public {
-        // Swap <= 50% of cap doesn't set flag
-        _swapAs(bot, botRouter, true, -2 ether); // 2 <= 2.5 → no flag
+        _swapAs(bot, botRouter, true, -2 ether);
 
         vm.roll(block.number + 1);
-        // No flag to clear — normal swap
         _swapAs(bot, botRouter, true, -2 ether);
     }
 
@@ -395,8 +475,10 @@ contract ImpactGuardTest is Test, Deployers {
 
     function test_constants() public view {
         assertEq(hook.POOL_IMPACT_THRESHOLD(), 10 ether);
-        assertEq(hook.SENDER_IMPACT_CAP(), 5 ether);
-        assertEq(hook.IMPACT_PENALTY_FEE(), 15000);
+        assertEq(hook.SENDER_VOLUME_THRESHOLD(), 5 ether);
+        assertEq(hook.IMPACT_FEE_TIER1(), 15000);
+        assertEq(hook.IMPACT_FEE_TIER2(), 30000);
+        assertEq(hook.IMPACT_FEE_TIER3(), 50000);
     }
 
     // =====================================================================
