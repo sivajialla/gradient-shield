@@ -37,10 +37,11 @@ import {IScoreTaskCreator} from "./IScoreTaskCreator.sol";
 /// quorum-verified scores feed back into fee decisions on subsequent swaps.
 ///
 /// hookData attestation (optional): swappers can pass a signed score
-/// attestation via hookData to skip the on-chain oracle SLOAD (~2,600 gas
-/// saved). The attestor signs (sender, score, expiry, chainId, hookAddress)
-/// off-chain; the hook verifies the ECDSA signature and uses the attested
-/// score. Falls back to on-chain oracle when hookData is empty, the
+/// attestation via hookData to skip the on-chain oracle call. The attestor
+/// signs (sender, score, expiry, chainId, hookAddress) off-chain; the hook
+/// verifies the ECDSA signature and uses the attested score. Gas cost is
+/// comparable to the oracle path — the value is in avoiding the external
+/// call latency. Falls back to on-chain oracle when hookData is empty, the
 /// attestor is not set, the signature is invalid, or the attestation expired.
 contract GradientShieldHook is BaseHook, IUnlockCallback {
     // BaseHook provides onlyPoolManager modifier via ImmutableState.
@@ -70,7 +71,7 @@ contract GradientShieldHook is BaseHook, IUnlockCallback {
     uint256 public constant POOL_IMPACT_THRESHOLD = 10 ether;
 
     // Per-sender impact cap: max abs(amountSpecified) any single sender can
-    // push through a pool in one block. Prevents large front-runs.
+    // push through a pool in one block. Prevents the back-run leg of a sandwich.
     uint256 public constant SENDER_IMPACT_CAP = 5 ether;
 
     // Penalty fee applied when impact guards trigger (1.50% = 15000 pips).

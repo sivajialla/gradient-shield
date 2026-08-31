@@ -118,8 +118,8 @@ contract GradientShieldTaskManager is
     // -----------------------------------------------------------------
 
     /// @notice Creates a scoring task for a target address over a block range.
-    ///         The generator (typically an off-chain watcher) calls this when
-    ///         suspicious activity is observed.
+    ///         Called by the generator (off-chain watcher) or the hook itself
+    ///         (auto-triggered on sandwich/JIT/impact detection).
     function createScoreTask(
         address subject,
         uint256 fromBlock,
