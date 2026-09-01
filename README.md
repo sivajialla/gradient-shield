@@ -803,27 +803,37 @@ make keygen             # regenerate demo operator BLS keys
 ### Local (Foundry)
 
 ```bash
-forge test -vvv                                    # all 200 tests pass
-forge test --match-path test/ImpactGuard.t.sol -vvv # impact guard tests
-forge test --match-path test/SandwichAttackSim.t.sol -vvv # sandwich sim
+forge test                                          # all 245 tests
+make demo-fee                                       # PoolManager charges the escalated fee
+make demo-economics                                 # A/B vs a plain pool
+make demo-bls                                       # real BLS aggregate signatures
+forge test --match-path test/TraderIdentity.t.sol   # trader vs router
 ```
 
-### Fork testing (Sepolia)
+### Live, on a local chain
 
 ```bash
-forge test --fork-url $SEPOLIA_RPC -vvv
+anvil                 # terminal 1
+make deploy-local     # terminal 2
+make avs              # terminal 3
+make attack           # terminal 4
 ```
+
+This is the one that catches what unit tests cannot — a Foundry test is a single
+transaction, and a real sandwich is three. See
+[Running the live demo](#running-the-live-demo).
 
 ### Testnet deployment
 
 ```bash
 export PRIVATE_KEY=<key>
+export RPC_URL=<sepolia_rpc>
 export POOL_MANAGER=<sepolia_pool_manager>
-forge script script/DeploySepolia.s.sol --rpc-url $SEPOLIA_RPC --broadcast
+make deploy-sepolia
 ```
 
-The deploy script outputs all contract addresses. Set them in `operator/.env`
-and run `npm run operator` to start watching for scoring tasks.
+The deploy script prints every contract address. Put them in `operator/.env`,
+then `make avs` to start the quorum.
 
 ---
 
@@ -864,43 +874,59 @@ forge script script/Deploy.s.sol --rpc-url $RPC_URL --broadcast
 ```
 .
 ├── src/
-│   ├── GradientShieldHook.sol          v4 hook: fee curve, sandwich/JIT detection,
-│   │                                    impact guards, multi-hop, attestation
-│   ├── GradientShieldTaskManager.sol   BLS quorum task manager
-│   ├── GradientShieldServiceManager.sol AVS service manager (BLS variant)
-│   ├── IGradientShieldTaskManager.sol  task manager interface & structs
-│   ├── IScoreTaskCreator.sol          lightweight hook→TaskManager interface
-│   └── ScoringOracle.sol              per-address score store with decay
-├── test/
-│   ├── ImpactGuard.t.sol              impact guard tests (24 tests)
-│   ├── HookEdgeCases.t.sol            edge cases (36 tests)
-│   ├── HookCoverage.t.sol             coverage paths (30 tests)
-│   ├── AccessControl.t.sol            permissions (22 tests)
-│   ├── TaskManagerAccess.t.sol        task manager access (16 tests)
-│   ├── ScoringOracle.t.sol            scoring + decay (15 tests)
-│   ├── TaskManager.t.sol              BLS task lifecycle (13 tests)
-│   ├── ServiceManager.t.sol           service manager (8 tests)
-│   ├── HookAttestorCoverage.t.sol     attestor paths (7 tests)
-│   ├── MEVAttackDefense.t.sol         sandwich/JIT/escalation (6 tests)
-│   ├── HookBehavior.t.sol             fee ladder (5 tests)
-│   ├── HookDataAttestation.t.sol      ECDSA attestation (5 tests)
-│   ├── DemoSimulation.t.sol           end-to-end demo (5 tests)
-│   ├── MEVSimulation.t.sol            MEV simulations (4 tests)
-│   ├── MultiHopSwap.t.sol             multi-hop settlement (3 tests)
-│   └── SandwichAttackSim.t.sol        sandwich simulation (1 test)
+│   ├── GradientShieldHook.sol           v4 hook: trader identity, fee curve,
+│   │                                     sandwich/JIT detection, impact guards,
+│   │                                     multi-hop, attestation
+│   ├── BLSQuorumTaskManager.sol         runnable AVS: own operator registry +
+│   │                                     real BN254 aggregate verification
+│   ├── GradientShieldTaskManager.sol    EigenLayer-backed BLS task manager
+│   ├── GradientShieldServiceManager.sol AVS identity layer (ServiceManagerBase)
+│   ├── ScoringOracle.sol                per-address score store with decay
+│   ├── ITrustedRouter.sol               getMsgSender() — recover the real trader
+│   ├── IScoreTaskCreator.sol            lightweight hook→TaskManager interface
+│   ├── IGradientShieldTaskManager.sol   task manager interface & structs
+│   └── libraries/BN254Lib.sol           BN254 subset, pragma-compatible with v4
+├── test/                                245 tests, 20 suites
+│   ├── HookEdgeCases.t.sol              edge cases (36)
+│   ├── HookCoverage.t.sol               coverage paths (30 + 7 attestor)
+│   ├── ImpactGuard.t.sol                volume tiers, pool guard (26)
+│   ├── AccessControl.t.sol              permissions (22)
+│   ├── TraderIdentity.t.sol             trader vs router, allow-list (21)
+│   ├── TaskManagerAccess.t.sol          task manager access (16)
+│   ├── ScoringOracle.t.sol              scoring + decay (15)
+│   ├── TaskManager.t.sol                EigenLayer task lifecycle (13)
+│   ├── BLSQuorumIntegration.t.sol       real BLS signatures, full loop (13)
+│   ├── ServiceManager.t.sol             service manager (8)
+│   ├── MEVAttackDefense.t.sol           sandwich/JIT/escalation (6)
+│   ├── HookBehavior.t.sol               fee ladder (5)
+│   ├── HookDataAttestation.t.sol        ECDSA attestation (5)
+│   ├── DemoSimulation.t.sol             reputation walkthrough (5)
+│   ├── CrossTransactionDetection.t.sol  storage regression guard (5)
+│   ├── MEVSimulation.t.sol              MEV simulations (4)
+│   ├── MEVEconomics.t.sol               A/B vs a plain pool (4)
+│   ├── MultiHopSwap.t.sol               multi-hop settlement (3)
+│   └── SandwichAttackSim.t.sol          sandwich walkthrough (1)
 ├── script/
-│   ├── Deploy.s.sol                   mainnet deploy with BLS infra
-│   ├── DeploySepolia.s.sol            Sepolia deploy with mock BLS
-│   └── MineHookAddress.s.sol          CREATE2 hook address miner
+│   ├── build-deck.cjs                   regenerates the demo deck
+│   ├── DeployLocal.s.sol                one-shot anvil demo stack
+│   ├── Deploy.s.sol                     deploy with real EigenLayer infra
+│   ├── DeploySepolia.s.sol              Sepolia deploy with mocked infra
+│   └── MineHookAddress.s.sol            CREATE2 hook address miner
 ├── operator/
-│   ├── operator.js                    event-based scoring operator
-│   ├── scoreAddress.js                manual address scoring tool
-│   ├── createTask.js                  task creation script
-│   └── abi/                           contract ABIs for operator
-├── lib/                               git-submodule dependencies
-├── foundry.toml                       auto_detect_solc, Cancun EVM
-├── remappings.txt                     import-path aliases
-└── README.md                          this file
+│   ├── avs.js                           operator quorum + aggregator
+│   ├── attack.js                        same-block sandwich demo driver
+│   ├── scoring.js                       event-based score computation
+│   ├── bls.js                           BN254 signing / aggregation
+│   ├── blsKeygen.js                     demo keypair generation
+│   ├── checkScore.js                    look up a live score
+│   ├── keys.json                        demo BLS keys (public, regenerable)
+│   └── abi/                             contract ABIs for the operator
+├── GradientShield-Demo.pptx             9-slide demo deck (regenerate:
+│                                         node script/build-deck.cjs)
+├── lib/                                 git-submodule dependencies
+├── foundry.toml                         auto_detect_solc, Cancun EVM
+├── remappings.txt                       import-path aliases
+└── README.md                            this file
 ```
 
 ## Dependency versions
