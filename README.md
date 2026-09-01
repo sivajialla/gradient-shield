@@ -10,7 +10,7 @@ score exists.
 
 # Project Number : HK-UHI10-1050
 
-> **241 tests passing, 0 skipped** across 19 test suites. Hook logic, BLS quorum
+> **245 tests passing, 0 skipped** across 20 test suites. Hook logic, BLS quorum
 > verification with real BN254 aggregate signatures, oracle decay, sandwich/JIT
 > detection, impact guards, hookData attestation, multi-hop ERC6909 settlement,
 > access control, edge cases, and the full escalation flow are implemented and
@@ -63,6 +63,58 @@ after the first swap in a pool.
 
 This is verified against a live chain, not just in tests — see
 [Running the live demo](#running-the-live-demo).
+
+---
+
+## What this actually changes (measured)
+
+It would be easy to overclaim here, so the numbers below come from
+`test/MEVEconomics.t.sol`, which runs the **same sandwich against two identical
+pools** — one with an ordinary base-fee hook, one with GradientShield. Same
+liquidity, same prices, same trade sizes; the only difference is the guard.
+
+Attack: bot front-runs 4 ETH → victim swaps 3 ETH → bot back-runs 4 ETH.
+
+| | Plain pool | GradientShield |
+|---|---:|---:|
+| Victim receives | 2.990344077 | **2.990344077** |
+| Victim's fee | 0.30% | **0.30%** |
+| Victim's loss vs. no attack | 0.000477014 | 0.000477014 |
+| **Bot's net P&L** | −0.011204838 | **−0.059210626** |
+
+Two conclusions, and the second one matters as much as the first:
+
+**1. The attacker pays 5.3x more.** The guard costs the bot an extra
+**0.048 ETH** on this trade — exactly the 1.2% fee delta applied to its 4 ETH
+back-run. A sandwich that was marginal becomes clearly loss-making, which is
+what removes the incentive to run it again.
+
+**2. The victim is left exactly where an ordinary pool would leave them.**
+Their execution is identical to the digit, and they are charged the base 0.30% —
+the bot's penalty never touches them. The guard imposes **zero cost on innocent
+flow**.
+
+### What it does *not* do
+
+**The victim is still sandwiched.** They lose 0.000477 ETH to the attack in
+*both* pools. The front-run lands before the victim's swap executes, so the
+price has already moved; a fee charged on the back-run afterwards cannot give
+that back, and none of it is routed to the victim.
+
+So this is a **deterrent, not a shield**. It protects the *next* victim by
+making the strategy unprofitable, and it converts what the attacker does extract
+into LP revenue — the escalated fee is an LP fee, so toxic flow subsidises the
+liquidity providers it preys on. `test_economics_victimStillSuffersSlippage`
+asserts this limitation rather than papering over it.
+
+One further honest caveat: the **pool-level** guard is pool-wide, not
+per-trader. Once total volume in a block passes 10 ETH, later swaps pay 1.50% —
+including a clean bystander's. `test_economics_poolGuardIsCollateralDamage`
+pins that down. The per-trader guard has no such effect.
+
+```bash
+make demo-economics
+```
 
 ---
 
@@ -485,6 +537,87 @@ Uses EigenLayer's BLS signature infrastructure for decentralized score consensus
 
 ---
 
+## Understand the hook by running it
+
+Six steps, in order. Each one answers a specific question, and each is a single
+command you can actually run — no reading required between them.
+
+### 1. Does it work at all?
+
+```bash
+forge test
+```
+
+245 tests, 20 suites, ~1 second. If this is green the rest of the ladder is
+worth your time.
+
+### 2. Is the fee real, or just an event the hook emits?
+
+```bash
+make demo-fee
+```
+
+Read the trace for **`Swap(... fee: ...)`** — that is the *PoolManager's* own
+event, not the hook's. You will see `fee: 3000` on the first leg and
+`fee: 15000` on the second, and the output amount shrink accordingly. This is
+the single most important thing to verify: the guard changes what the pool
+charges, not just what the hook logs.
+
+### 3. What does that cost the attacker, and what does it cost everyone else?
+
+```bash
+make demo-economics
+```
+
+The same sandwich against two identical pools, one plain and one guarded. See
+[What this actually changes](#what-this-actually-changes-measured) for how to
+read the output. The line to look for is `change in what the victim received: 0`.
+
+### 4. Who gets blamed?
+
+```bash
+forge test --match-path test/TraderIdentity.t.sol -vv
+```
+
+v4 hands the hook a *router*, not a person. These 21 tests are the difference
+between scoring the trader and scoring the Universal Router — including the
+attack where an unvetted contract tries to name someone else as the trader.
+
+### 5. Does the AVS actually verify signatures, or is it stubbed?
+
+```bash
+make demo-bls
+```
+
+Real BN254 keys, real aggregate signatures, verified through the EVM pairing
+precompile. Forged signatures, mismatched aggregate keys, and duplicate signers
+are all rejected. Nothing here is mocked.
+
+### 6. Does the whole loop close on a real chain?
+
+```bash
+anvil                 # terminal 1
+make deploy-local     # terminal 2
+make avs              # terminal 3
+make attack           # terminal 4
+```
+
+Full walkthrough in [Running the live demo](#running-the-live-demo). This is the
+step that catches what unit tests cannot — it was how the transient-storage bug
+was found, since a Foundry test is one transaction and a real sandwich is three.
+
+### Where to read the code
+
+| Question | File |
+|----------|------|
+| How is the fee decided? | [`_beforeSwap`](src/GradientShieldHook.sol) → `_computeFee`, `_applyImpactGuards` |
+| Who is the trader? | `_resolveTrader` in the same file, plus [`ITrustedRouter`](src/ITrustedRouter.sol) |
+| How is a sandwich spotted? | `_detectSandwich`, and `_bload`/`_bstore` for why the state is block-scoped |
+| How is a score agreed? | [`BLSQuorumTaskManager.respondToScoreTask`](src/BLSQuorumTaskManager.sol) |
+| How is a score turned into a number? | [`operator/scoring.js`](operator/scoring.js) |
+
+---
+
 ## Getting started
 
 ### Prerequisites
@@ -522,7 +655,7 @@ forge build
 forge test
 ```
 
-All 241 tests should pass:
+All 245 tests should pass:
 
 | Suite | Tests | What it covers |
 |-------|:-----:|----------------|
@@ -540,6 +673,7 @@ All 241 tests should pass:
 | `HookBehavior.t.sol` | 5 | Fee ladder, dynamic fee override, permissions |
 | `HookDataAttestation.t.sol` | 5 | ECDSA attestation via hookData, fallback paths |
 | `DemoSimulation.t.sol` | 5 | End-to-end scoring scenarios with BLS quorum |
+| `MEVEconomics.t.sol` | 4 | **A/B against a plain pool**: attacker cost, victim impact, LP revenue |
 | `TraderIdentity.t.sol` | 21 | **Trader vs router attribution**, `getMsgSender()` allow-list, spoofing attempts |
 | `CrossTransactionDetection.t.sol` | 5 | Detection state persists across transactions (regression guard) |
 | `MEVSimulation.t.sol` | 4 | MEV attack simulations |
@@ -648,9 +782,10 @@ make score ADDR=0x...
 ```bash
 make help               # list all available targets
 make install            # install Solidity + Node.js deps
-make test               # run all 241 tests
+make test               # run all 245 tests
 make demo-bls           # BLS quorum integration suite (real signatures)
 make demo-fee           # trace showing PoolManager charging the escalated fee
+make demo-economics     # same sandwich, two pools: what the guard costs
 make demo               # 5-scenario reputation walkthrough
 make deploy-local       # deploy the full stack to anvil
 make avs                # run the operator quorum + aggregator

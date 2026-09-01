@@ -11,7 +11,7 @@ LOCAL_KEY ?= 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
 
 .DEFAULT_GOAL := help
 .PHONY: help install build clean sizes fmt fmt-check \
-        test test-verbose demo demo-bls demo-fee snapshot \
+        test test-verbose demo demo-bls demo-fee demo-economics snapshot \
         anvil deploy-local avs attack score keygen \
         deploy deploy-sepolia mine-hook
 
@@ -65,6 +65,10 @@ demo-bls:
 ## demo-fee: show the PoolManager charging the escalated fee (read the Swap event)
 demo-fee:
 	forge test --match-test test_senderVolume_exceedsThresholdEscalatesFee -vvvv
+
+## demo-economics: same sandwich, two pools - what the guard costs the attacker
+demo-economics:
+	forge test --match-path test/MEVEconomics.t.sol -vv
 
 ## demo: the 5-scenario reputation walkthrough (clean, occasional, bot, reformed)
 demo:
