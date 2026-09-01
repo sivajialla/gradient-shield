@@ -16,6 +16,7 @@ import {TransientStateLibrary} from "@uniswap/v4-core/src/libraries/TransientSta
 
 import {ScoringOracle} from "./ScoringOracle.sol";
 import {IScoreTaskCreator} from "./IScoreTaskCreator.sol";
+import {ITrustedRouter} from "./ITrustedRouter.sol";
 
 /// @title GradientShieldHook
 /// @notice Uniswap v4 hook that prices swaps by the swapper's MEV risk score,
@@ -125,10 +126,13 @@ contract GradientShieldHook is BaseHook, IUnlockCallback {
     ///      explicit reset.
     mapping(bytes32 => uint256) internal _blockState;
 
-    /// @notice Routers trusted to declare the true originator in `hookData`.
-    /// @dev See {_resolveTrader}. Marking a router here asserts that the router
-    ///      writes the originator itself; a router that merely forwards
-    ///      caller-supplied bytes must never be listed.
+    /// @notice Routers trusted to report the true originator of a swap.
+    /// @dev The allow-list every identity claim is gated on — see
+    ///      {_resolveTrader}. Listing a router asserts that it reports the
+    ///      originator honestly, either via {ITrustedRouter.getMsgSender} or by
+    ///      writing the address into `hookData` itself. A router that merely
+    ///      forwards caller-supplied bytes must never be listed, since the
+    ///      caller would then choose their own identity.
     mapping(address => bool) public trustedRouters;
 
     /// @notice Can only mark routers as originator-forwarding. Deliberately
@@ -190,8 +194,10 @@ contract GradientShieldHook is BaseHook, IUnlockCallback {
     event TrustedRouterSet(address indexed router, bool trusted);
     event OwnershipTransferred(address indexed from, address indexed to);
 
-    /// @notice Mark a router as one that declares the true originator in
-    ///         `hookData`. See {_resolveTrader} for the trust assumption.
+    /// @notice Mark a router as one that honestly reports the swap originator.
+    /// @dev Only vet routers whose source you have read. A listed router can
+    ///      name any address as the trader, so a malicious one could launder
+    ///      its own reputation or frame an innocent address.
     function setTrustedRouter(address router, bool trusted) external {
         if (msg.sender != owner) revert NotOwner();
         if (router == address(0)) revert ZeroAddress();
@@ -379,24 +385,56 @@ contract GradientShieldHook is BaseHook, IUnlockCallback {
     /// {REJECT_THRESHOLD} and bricks the pool for everyone.
     ///
     /// Resolution order:
-    ///   1. A **trusted router** that declares the originator in `hookData`.
-    ///      Only routers the owner has vetted are believed, and the router must
-    ///      write this itself rather than forwarding caller-supplied bytes —
-    ///      otherwise a bot would simply declare a clean address. This is the
-    ///      only path that stays correct under ERC-4337, where `tx.origin` is
-    ///      the bundler.
-    ///   2. `tx.origin` — the EOA that signed the transaction.
+    ///   1. `ITrustedRouter.getMsgSender()` on the router — but **only** when
+    ///      `sender` is in {trustedRouters}. See the security note below.
+    ///   2. An originator the same trusted router declared in `hookData`, for
+    ///      routers that can forward bytes but cannot add a getter.
+    ///   3. `tx.origin` — the EOA that signed the transaction.
+    ///
+    /// Paths 1 and 2 are the only ones that stay correct under ERC-4337, where
+    /// `tx.origin` is the bundler rather than the account.
+    ///
+    /// @dev SECURITY — why the allow-list gate is load-bearing: anyone can
+    ///      deploy a contract that calls the PoolManager directly, which makes
+    ///      that contract the `sender` the hook receives. If the hook called
+    ///      `getMsgSender()` on it unconditionally, the contract could return
+    ///      any address at all — naming a clean address to launder its own
+    ///      reputation, or an innocent one to get it penalised. `sender` is
+    ///      therefore never trusted until it has been vetted by the owner.
+    ///
+    /// @dev The call is `view`, so the compiler emits a STATICCALL: a
+    ///      misbehaving router cannot mutate state or re-enter. It is wrapped in
+    ///      try/catch so a router that reverts, runs out of gas, or does not
+    ///      implement the interface degrades to the next path instead of
+    ///      failing the swap.
     ///
     /// @dev `tx.origin` is used for *attribution and pricing*, never for
     ///      authorization, so the usual phishing objection to `tx.origin` does
     ///      not apply: the worst case is that an address is charged for a swap
     ///      its own signature authorised. It also cannot be spoofed — forging it
     ///      would require the victim's private key.
+    ///
+    /// @dev An unrecognised `sender` deliberately falls through to `tx.origin`
+    ///      rather than reverting. Reverting would make the pool permissioned —
+    ///      only allow-listed routers could trade — which this hook does not do.
     function _resolveTrader(address sender, bytes calldata hookData) internal view returns (address) {
-        if (trustedRouters[sender] && hookData.length == 32) {
-            address declared = abi.decode(hookData, (address));
-            if (declared != address(0)) return declared;
+        if (trustedRouters[sender]) {
+            // 1. Ask the router who called it.
+            try ITrustedRouter(sender).getMsgSender() returns (address user) {
+                if (user != address(0)) return user;
+            } catch {
+                // Fall through — router does not implement it, or reverted.
+            }
+
+            // 2. Originator declared in hookData. 32 bytes distinguishes this
+            //    from the 160-byte score attestation {_resolveScore} reads.
+            if (hookData.length == 32) {
+                address declared = abi.decode(hookData, (address));
+                if (declared != address(0)) return declared;
+            }
         }
+
+        // 3. Unknown router, or a trusted one that reported nothing usable.
         return tx.origin;
     }
 

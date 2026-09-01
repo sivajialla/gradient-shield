@@ -14,6 +14,9 @@ import {SwapParams, ModifyLiquidityParams} from "@uniswap/v4-core/src/types/Pool
 import {PoolSwapTest} from "@uniswap/v4-core/src/test/PoolSwapTest.sol";
 import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 import {HookMiner} from "@uniswap/v4-periphery/src/utils/HookMiner.sol";
+import {IUnlockCallback} from "@uniswap/v4-core/src/interfaces/callback/IUnlockCallback.sol";
+import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
+import {CurrencySettler} from "@uniswap/v4-core/test/utils/CurrencySettler.sol";
 
 import {GradientShieldHook} from "../src/GradientShieldHook.sol";
 import {ScoringOracle} from "../src/ScoringOracle.sol";
@@ -44,6 +47,8 @@ contract TraderIdentityTest is Test, Deployers {
     address internal constant BOT = address(0xB01);
     address internal constant HONEST = address(0xA01);
     address internal constant OTHER = address(0xA02);
+    address internal constant BUNDLER = address(0xB0D1E);
+    address internal constant SMART_ACCOUNT = address(0x5A11);
 
     address internal avs = address(0xA75);
 
@@ -213,7 +218,122 @@ contract TraderIdentityTest is Test, Deployers {
     }
 
     // =====================================================================
-    //  TRUSTED ROUTER PATH (account abstraction)
+    //  TRUSTED ROUTER — getMsgSender() PATH
+    // =====================================================================
+
+    function test_getMsgSender_authorizedRouterIsBelieved() public {
+        SpoofingRouter router = new SpoofingRouter(manager, SMART_ACCOUNT);
+        _fundRouter(router);
+        hook.setTrustedRouter(address(router), true);
+
+        // tx.origin is a bundler; the router reports the real account.
+        vm.recordLogs();
+        _swapViaRouter(router, BUNDLER, true, -1 ether);
+
+        assertEq(_swapperFrom(vm.getRecordedLogs()), SMART_ACCOUNT, "authorized router's getMsgSender() is used");
+    }
+
+    /// The load-bearing security check. An unauthorized contract can call the
+    /// PoolManager directly, which makes it the `sender` the hook receives. If
+    /// the hook called getMsgSender() on it, the contract could name any
+    /// address — laundering its own reputation or framing an innocent one.
+    function test_getMsgSender_unauthorizedRouterIsNeverCalled() public {
+        // This router will happily claim to be an innocent address.
+        SpoofingRouter attacker = new SpoofingRouter(manager, HONEST);
+        _fundRouter(attacker);
+        // Deliberately NOT added to trustedRouters.
+
+        vm.prank(avs);
+        oracle.setScore(BOT, 85);
+
+        // The bot drives the spoofing router, which claims to be HONEST
+        // (score 0). If the hook believed an unvetted sender the swap would go
+        // through; instead the bot's own score 85 applies and it reverts.
+        vm.expectRevert();
+        _swapViaRouter(attacker, BOT, true, -1 ether);
+
+        // And the claim buys nothing even when the claimed address is clean:
+        // an unvetted router is simply never asked.
+        vm.recordLogs();
+        _swapViaRouter(attacker, OTHER, true, -1 ether);
+        assertEq(_swapperFrom(vm.getRecordedLogs()), OTHER, "unvetted claim ignored; tx.origin used");
+    }
+
+    /// The getter is called via STATICCALL, so a trusted-but-buggy router
+    /// cannot mutate state or re-enter through it.
+    function test_getMsgSender_stateMutatingGetterIsRejected() public {
+        MutatingRouter router = new MutatingRouter(manager);
+        _fundRouter(router);
+        hook.setTrustedRouter(address(router), true);
+
+        vm.recordLogs();
+        _swapViaRouter(router, BOT, true, -1 ether);
+
+        assertEq(_swapperFrom(vm.getRecordedLogs()), BOT, "staticcall blocks the write, hook falls back");
+        assertEq(router.calls(), 0, "no state change survived");
+    }
+
+    /// Revoking trust must take effect immediately.
+    function test_getMsgSender_deauthorizedRouterIsIgnored() public {
+        SpoofingRouter router = new SpoofingRouter(manager, SMART_ACCOUNT);
+        _fundRouter(router);
+
+        hook.setTrustedRouter(address(router), true);
+        vm.recordLogs();
+        _swapViaRouter(router, BUNDLER, true, -1 ether);
+        assertEq(_swapperFrom(vm.getRecordedLogs()), SMART_ACCOUNT);
+
+        hook.setTrustedRouter(address(router), false);
+        vm.recordLogs();
+        _swapViaRouter(router, BUNDLER, true, -1 ether);
+        assertEq(_swapperFrom(vm.getRecordedLogs()), BUNDLER, "revoked router falls back to tx.origin");
+    }
+
+    /// A trusted router that reverts, runs out of gas, or does not implement
+    /// the interface must degrade, not break the swap.
+    function test_getMsgSender_revertingRouterFallsBackNotReverts() public {
+        RevertingRouter router = new RevertingRouter(manager);
+        _fundRouter(router);
+        hook.setTrustedRouter(address(router), true);
+
+        vm.recordLogs();
+        _swapViaRouter(router, BOT, true, -1 ether);
+
+        assertEq(_swapperFrom(vm.getRecordedLogs()), BOT, "reverting getter falls back to tx.origin");
+    }
+
+    function test_getMsgSender_zeroAddressFallsBack() public {
+        SpoofingRouter router = new SpoofingRouter(manager, address(0));
+        _fundRouter(router);
+        hook.setTrustedRouter(address(router), true);
+
+        vm.recordLogs();
+        _swapViaRouter(router, BOT, true, -1 ether);
+
+        assertEq(_swapperFrom(vm.getRecordedLogs()), BOT, "a zero report falls back to tx.origin");
+    }
+
+    /// An unrecognised router must still be able to trade. Reverting on an
+    /// unknown sender would make the pool permissioned.
+    function test_unknownRouter_stillPermissionless() public {
+        PoolSwapTest plainRouter = new PoolSwapTest(manager);
+        MockERC20(Currency.unwrap(currency0)).approve(address(plainRouter), type(uint256).max);
+        MockERC20(Currency.unwrap(currency1)).approve(address(plainRouter), type(uint256).max);
+
+        vm.recordLogs();
+        vm.prank(address(this), HONEST);
+        plainRouter.swap(
+            key,
+            SwapParams({zeroForOne: true, amountSpecified: -1 ether, sqrtPriceLimitX96: MIN_PRICE_LIMIT}),
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false}),
+            ZERO_BYTES
+        );
+
+        assertEq(_swapperFrom(vm.getRecordedLogs()), HONEST, "unknown routers work, attributed by tx.origin");
+    }
+
+    // =====================================================================
+    //  TRUSTED ROUTER — hookData PATH (routers that cannot add a getter)
     // =====================================================================
 
     function test_trustedRouter_declaredOriginatorIsUsed() public {
@@ -334,6 +454,26 @@ contract TraderIdentityTest is Test, Deployers {
         );
     }
 
+    function _swapViaRouter(IdentityRouter router, address origin, bool zeroForOne, int256 amount) internal {
+        vm.prank(address(this), origin);
+        router.doSwap(key, zeroForOne, amount);
+    }
+
+    function _fundRouter(IdentityRouter router) internal {
+        MockERC20 t0 = MockERC20(Currency.unwrap(currency0));
+        MockERC20 t1 = MockERC20(Currency.unwrap(currency1));
+        t0.mint(address(router), 1000 ether);
+        t1.mint(address(router), 1000 ether);
+    }
+
+    /// @dev The `swapper` topic of the single SwapTelemetry event in `logs`.
+    function _swapperFrom(Vm.Log[] memory logs) internal pure returns (address swapper) {
+        bytes32 sig = keccak256("SwapTelemetry(bytes32,address,bool,int256,uint16,uint24,uint256)");
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] == sig) swapper = address(uint160(uint256(logs[i].topics[2])));
+        }
+    }
+
     function _feeFrom(Vm.Log[] memory logs, address trader) internal pure returns (uint24 fee) {
         bytes32 sig = keccak256("SwapTelemetry(bytes32,address,bool,int256,uint16,uint24,uint256)");
         for (uint256 i = 0; i < logs.length; i++) {
@@ -342,5 +482,104 @@ contract TraderIdentityTest is Test, Deployers {
                 fee = charged;
             }
         }
+    }
+}
+
+// =========================================================================
+//  Mock routers
+// =========================================================================
+
+/// @dev A minimal router that calls the PoolManager directly, so the hook sees
+///      *this contract* as `sender`. It settles from its own token balance, so
+///      tests only need to fund it.
+abstract contract IdentityRouter is IUnlockCallback {
+    using CurrencySettler for Currency;
+
+    // TickMath.MIN_SQRT_PRICE + 1 / MAX_SQRT_PRICE - 1
+    uint160 internal constant MIN_LIMIT = 4295128740;
+    uint160 internal constant MAX_LIMIT = 1461446703485210103287273052203988822378723970341;
+
+    IPoolManager public immutable manager;
+
+    struct CallbackData {
+        PoolKey key;
+        SwapParams params;
+    }
+
+    constructor(IPoolManager _manager) {
+        manager = _manager;
+    }
+
+    function doSwap(PoolKey memory key, bool zeroForOne, int256 amount) external {
+        manager.unlock(
+            abi.encode(
+                CallbackData({
+                    key: key,
+                    params: SwapParams({
+                        zeroForOne: zeroForOne,
+                        amountSpecified: amount,
+                        sqrtPriceLimitX96: zeroForOne ? MIN_LIMIT : MAX_LIMIT
+                    })
+                })
+            )
+        );
+    }
+
+    function unlockCallback(bytes calldata data) external returns (bytes memory) {
+        require(msg.sender == address(manager), "not manager");
+        CallbackData memory d = abi.decode(data, (CallbackData));
+
+        BalanceDelta delta = manager.swap(d.key, d.params, "");
+
+        _resolve(d.key.currency0, delta.amount0());
+        _resolve(d.key.currency1, delta.amount1());
+        return "";
+    }
+
+    function _resolve(Currency currency, int128 amount) internal {
+        if (amount < 0) {
+            currency.settle(manager, address(this), uint256(uint128(-amount)), false);
+        } else if (amount > 0) {
+            currency.take(manager, address(this), uint256(uint128(amount)), false);
+        }
+    }
+}
+
+/// @dev Reports whatever address it was constructed with. Used both as a
+///      well-behaved trusted router and as an attacker trying to spoof a
+///      trader from an unauthorized address.
+contract SpoofingRouter is IdentityRouter {
+    address public immutable claimed;
+
+    constructor(IPoolManager _manager, address _claimed) IdentityRouter(_manager) {
+        claimed = _claimed;
+    }
+
+    function getMsgSender() external view returns (address) {
+        return claimed;
+    }
+}
+
+/// @dev A router whose getter tries to write storage. The hook issues a
+///      STATICCALL, so the write reverts and the hook falls back — a router
+///      cannot use this entrypoint to re-enter or mutate anything.
+contract MutatingRouter is IdentityRouter {
+    uint256 public calls;
+
+    constructor(IPoolManager _manager) IdentityRouter(_manager) {}
+
+    function getMsgSender() external returns (address) {
+        calls++; // reverts under STATICCALL
+        return address(0xDEAD);
+    }
+}
+
+/// @dev A trusted router whose getter reverts — the hook must degrade to
+///      tx.origin rather than failing the swap.
+contract RevertingRouter is IdentityRouter {
+    constructor(IPoolManager _manager) IdentityRouter(_manager) {}
+
+    function getMsgSender() external pure returns (address) {
+        revert("no sender available");
     }
 }

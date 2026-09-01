@@ -10,7 +10,7 @@ score exists.
 
 # Project Number : HK-UHI10-1050
 
-> **234 tests passing, 0 skipped** across 19 test suites. Hook logic, BLS quorum
+> **241 tests passing, 0 skipped** across 19 test suites. Hook logic, BLS quorum
 > verification with real BN254 aggregate signatures, oracle decay, sandwich/JIT
 > detection, impact guards, hookData attestation, multi-hop ERC6909 settlement,
 > access control, edge cases, and the full escalation flow are implemented and
@@ -118,7 +118,7 @@ sequenceDiagram
     User->>PM: swap() via a router
     PM->>Hook: beforeSwap(sender = router, key, params)
 
-    Note over Hook: Identity: _resolveTrader(sender, hookData)<br/>trusted router's originator, else tx.origin
+    Note over Hook: Identity: _resolveTrader(sender, hookData)<br/>allow-listed router.getMsgSender(), else tx.origin
     Hook->>Hook: trader = _resolveTrader(...)
 
     Hook->>Oracle: getScore(trader)
@@ -205,13 +205,46 @@ consequences are severe:
 
 | # | Source | When it applies |
 |:-:|--------|-----------------|
-| 1 | Originator declared by a **trusted router** in `hookData` | Router is registered via `setTrustedRouter`. The only path that stays correct under ERC-4337, where `tx.origin` is the bundler. |
-| 2 | `tx.origin` | Everything else — the EOA that signed the transaction. |
+| 1 | `ITrustedRouter.getMsgSender()` on the router | Router is on the allow-list. Preferred, because it leaves `hookData` free for the signed score attestation. |
+| 2 | Originator the same trusted router wrote into `hookData` | For routers that can forward bytes but cannot add a getter. |
+| 3 | `tx.origin` | Everything else — the EOA that signed the transaction. |
 
-A router is believed only if the owner has vetted it, and only if the router
-**writes the originator itself** rather than forwarding caller-supplied bytes —
-otherwise a bot would simply declare a clean address. `test_untrustedRouter_
-cannotSpoofOriginator` pins that down.
+Paths 1 and 2 are the only ones that stay correct under ERC-4337, where
+`tx.origin` is the bundler rather than the account.
+
+### The allow-list is the load-bearing part
+
+```solidity
+if (trustedRouters[sender]) {
+    try ITrustedRouter(sender).getMsgSender() returns (address user) {
+        if (user != address(0)) return user;
+    } catch { /* fall through */ }
+    ...
+}
+return tx.origin;
+```
+
+Anyone can deploy a contract that calls the PoolManager directly, which makes
+that contract the `sender` the hook receives. If the hook called
+`getMsgSender()` on it unconditionally, the contract could return **any address
+at all** — naming a clean address to launder its own reputation, or an innocent
+one to get it penalised. So `sender` is never trusted until the owner has vetted
+it. `test_getMsgSender_unauthorizedRouterIsNeverCalled` drives exactly this
+attack and shows it fails.
+
+Three further properties, each with a test:
+
+- **The call is a STATICCALL** (the interface method is `view`), so a
+  trusted-but-buggy router cannot mutate state or re-enter. A getter that tries
+  to write is rejected and the hook falls back.
+- **It is wrapped in try/catch**, so a router that reverts, runs out of gas, or
+  does not implement the interface degrades to the next path instead of failing
+  the swap.
+- **An unknown router is not rejected — it falls through to `tx.origin`.**
+  Reverting on an unrecognised sender (`revert("SenderNotAuthorized")`) is the
+  obvious-looking move, but it would make the pool **permissioned**: only
+  allow-listed routers could trade. This hook stays permissionless, so an
+  unvetted router simply gets the weaker identity signal.
 
 > **On `tx.origin`:** it is used here for *attribution and pricing*, never for
 > authorization, so the usual phishing objection does not apply — the worst case
@@ -234,8 +267,9 @@ and a victim trading through **the same router in the same block**:
   router score = 0
 ```
 
-`test/TraderIdentity.t.sol` covers this, including both original failure modes,
-the trusted-router path, and spoofing attempts.
+`test/TraderIdentity.t.sol` covers this — both original failure modes, the
+`getMsgSender()` allow-list, revoked routers, reverting and state-mutating
+getters, and spoofing attempts from unvetted senders.
 
 ---
 
@@ -444,6 +478,7 @@ Uses EigenLayer's BLS signature infrastructure for decentralized score consensus
 | `BLSQuorumTaskManager` | on-chain | **The runnable AVS.** Own operator registry + real BN254 aggregate signature verification via the pairing precompile. Deploys on bare anvil — no EigenLayer infra. |
 | `GradientShieldTaskManager` | on-chain | EigenLayer-backed variant. Same crypto, but quorum weight comes from the StakeRegistry and it needs the full middleware stack deployed. |
 | `GradientShieldServiceManager` | on-chain | AVS identity layer. Links to TaskManager, handles EigenLayer registration. |
+| `ITrustedRouter` | on-chain | Interface a router implements (`getMsgSender()`) so the hook can recover the real trader behind it. |
 | `BN254Lib` | on-chain | Vendored, 0.8.26-compatible subset of EigenLayer's BN254 library. Needed because v4-core pins `=0.8.26` while the EigenLayer library declares `^0.8.27`. |
 | `operator/avs.js` | off-chain | Operator quorum + aggregator. Reads hook events, scores the subject, signs with BLS, aggregates, submits. |
 | `operator/attack.js` | off-chain | Demo driver. Mines a genuine three-transaction sandwich into a single block. |
@@ -487,7 +522,7 @@ forge build
 forge test
 ```
 
-All 234 tests should pass:
+All 241 tests should pass:
 
 | Suite | Tests | What it covers |
 |-------|:-----:|----------------|
@@ -505,7 +540,7 @@ All 234 tests should pass:
 | `HookBehavior.t.sol` | 5 | Fee ladder, dynamic fee override, permissions |
 | `HookDataAttestation.t.sol` | 5 | ECDSA attestation via hookData, fallback paths |
 | `DemoSimulation.t.sol` | 5 | End-to-end scoring scenarios with BLS quorum |
-| `TraderIdentity.t.sol` | 14 | **Trader vs router attribution**, trusted-router path, spoofing attempts |
+| `TraderIdentity.t.sol` | 21 | **Trader vs router attribution**, `getMsgSender()` allow-list, spoofing attempts |
 | `CrossTransactionDetection.t.sol` | 5 | Detection state persists across transactions (regression guard) |
 | `MEVSimulation.t.sol` | 4 | MEV attack simulations |
 | `MultiHopSwap.t.sol` | 3 | ERC6909 multi-hop settlement |
@@ -613,7 +648,7 @@ make score ADDR=0x...
 ```bash
 make help               # list all available targets
 make install            # install Solidity + Node.js deps
-make test               # run all 234 tests
+make test               # run all 241 tests
 make demo-bls           # BLS quorum integration suite (real signatures)
 make demo-fee           # trace showing PoolManager charging the escalated fee
 make demo               # 5-scenario reputation walkthrough
