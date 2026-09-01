@@ -226,12 +226,12 @@ contract BLSQuorumIntegrationTest is Test, Deployers {
         assertTrue(taskMade, "hook should auto-create a scoring task");
         console2.log("      SandwichDetected + ScoreTaskCreated emitted");
 
-        uint32 taskIndex = tm.latestTaskForSubject(address(botRouter));
+        uint32 taskIndex = tm.latestTaskForSubject(bot);
         console2.log("      Task index:", taskIndex);
 
         // --- 2. Operators independently sign the verdict ---
         uint16 verdict = 60;
-        bytes32 msgHash = tm.scoreMessageHash(taskIndex, address(botRouter), verdict);
+        bytes32 msgHash = tm.scoreMessageHash(taskIndex, bot, verdict);
         console2.log("");
         console2.log("  [2] 3 operators sign score=60 with their BLS keys");
 
@@ -241,14 +241,14 @@ contract BLSQuorumIntegrationTest is Test, Deployers {
         // --- 3. Aggregator submits; the pairing precompile verifies ---
         console2.log("");
         console2.log("  [3] Aggregator submits to BLSQuorumTaskManager");
-        assertEq(oracle.getScore(address(botRouter)), 0, "score starts clean");
+        assertEq(oracle.getScore(bot), 0, "score starts clean");
 
         uint256[] memory signers = _signers3();
         vm.prank(aggregator);
         tm.respondToScoreTask(taskIndex, verdict, signers, apkG2_All3(), sigma);
 
-        assertEq(oracle.getScore(address(botRouter)), 60, "BLS quorum wrote the score");
-        console2.log("      BLS pairing VERIFIED - oracle score now:", oracle.getScore(address(botRouter)));
+        assertEq(oracle.getScore(bot), 60, "BLS quorum wrote the score");
+        console2.log("      BLS pairing VERIFIED - oracle score now:", oracle.getScore(bot));
 
         // --- 4. The bot's next swap is priced off the quorum verdict ---
         console2.log("");
@@ -267,14 +267,14 @@ contract BLSQuorumIntegrationTest is Test, Deployers {
         console2.log("");
         console2.log("  [5] Bot reoffends; quorum raises the score to 85");
         vm.roll(block.number + 1);
-        _createTaskAsGenerator(address(botRouter), 67);
+        _createTaskAsGenerator(bot, 67);
 
-        uint32 t2 = tm.latestTaskForSubject(address(botRouter));
-        BN254Lib.G1Point memory sigma2 = _aggregateSign3(tm.scoreMessageHash(t2, address(botRouter), 85));
+        uint32 t2 = tm.latestTaskForSubject(bot);
+        BN254Lib.G1Point memory sigma2 = _aggregateSign3(tm.scoreMessageHash(t2, bot, 85));
 
         vm.prank(aggregator);
         tm.respondToScoreTask(t2, 85, _signers3(), apkG2_All3(), sigma2);
-        assertEq(oracle.getScore(address(botRouter)), 85);
+        assertEq(oracle.getScore(bot), 85);
 
         vm.roll(block.number + 1);
         vm.expectRevert(
@@ -282,7 +282,7 @@ contract BLSQuorumIntegrationTest is Test, Deployers {
                 CustomRevert.WrappedError.selector,
                 address(hook),
                 IHooks.beforeSwap.selector,
-                abi.encodeWithSelector(GradientShieldHook.BotRejected.selector, address(botRouter), uint16(85)),
+                abi.encodeWithSelector(GradientShieldHook.BotRejected.selector, bot, uint16(85)),
                 abi.encodeWithSelector(Hooks.HookCallFailed.selector)
             )
         );
@@ -502,7 +502,10 @@ contract BLSQuorumIntegrationTest is Test, Deployers {
     ///      Note the hook still identifies the swapper as the *router* — see
     ///      the identity caveat in the README.
     function _swap(PoolSwapTest router, bool zeroForOne, int256 amount) internal {
-        vm.prank(router == botRouter ? bot : victim);
+        // Two-arg prank sets tx.origin, so the hook resolves each actor as a
+        // distinct trader rather than collapsing them into the router.
+        address actor = router == botRouter ? bot : victim;
+        vm.prank(actor, actor);
         router.swap(
             key,
             SwapParams({

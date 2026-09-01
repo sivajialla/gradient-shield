@@ -31,6 +31,11 @@ contract HookEdgeCasesTest is Test, Deployers {
     GradientShieldHook internal hook;
     ScoringOracle internal oracle;
 
+    // Trader identities. The hook attributes by trader, not by router, so
+    // separate routers no longer imply separate identities.
+    address internal constant BOT1 = address(0xB01);
+    address internal constant BOT2 = address(0xB02);
+    address internal constant VICTIM = address(0xA01);
     PoolSwapTest internal botRouter;
     PoolSwapTest internal bot2Router;
     PoolSwapTest internal victimRouter;
@@ -92,19 +97,19 @@ contract HookEdgeCasesTest is Test, Deployers {
         // Score 0: clean, should get exactly BASE_FEE
         PoolId poolId = key.toId();
         vm.expectEmit(true, true, false, false);
-        emit GradientShieldHook.SwapTelemetry(poolId, address(cleanRouter), true, -100, 0, 3000, block.number);
+        emit GradientShieldHook.SwapTelemetry(poolId, tx.origin, true, -100, 0, 3000, block.number);
         _swap(cleanRouter, true, -100);
     }
 
     function test_feeCurve_score39_stillBaseFee() public {
         // Score 39: right below suspicious threshold, should still be base fee
         vm.prank(avs);
-        oracle.setScore(address(botRouter), 39);
+        oracle.setScore(tx.origin, 39);
 
         PoolId poolId = key.toId();
         // fee = BASE_FEE because score < 40
         vm.expectEmit(true, true, false, false);
-        emit GradientShieldHook.SwapTelemetry(poolId, address(botRouter), true, -100, 39, 3000, block.number);
+        emit GradientShieldHook.SwapTelemetry(poolId, tx.origin, true, -100, 39, 3000, block.number);
         _swap(botRouter, true, -100);
     }
 
@@ -112,7 +117,7 @@ contract HookEdgeCasesTest is Test, Deployers {
         // Score 40: exactly at suspicious threshold, but fee = 3000 + 12000*(0)/40 = 3000
         // Equal to BASE_FEE, so NO FeeEscalated event
         vm.prank(avs);
-        oracle.setScore(address(botRouter), 40);
+        oracle.setScore(tx.origin, 40);
 
         vm.recordLogs();
         _swap(botRouter, true, -100);
@@ -127,42 +132,42 @@ contract HookEdgeCasesTest is Test, Deployers {
     function test_feeCurve_score41_firstRealEscalation() public {
         // Score 41: first score that actually produces fee > BASE_FEE
         vm.prank(avs);
-        oracle.setScore(address(botRouter), 41);
+        oracle.setScore(tx.origin, 41);
 
         PoolId poolId = key.toId();
         // fee = 3000 + 12000 * (41-40) / 40 = 3000 + 300 = 3300
         vm.expectEmit(true, true, false, true);
-        emit GradientShieldHook.FeeEscalated(poolId, address(botRouter), 3000, 3300);
+        emit GradientShieldHook.FeeEscalated(poolId, tx.origin, 3000, 3300);
         _swap(botRouter, true, -100);
     }
 
     function test_feeCurve_score60_midEscalation() public {
         vm.prank(avs);
-        oracle.setScore(address(botRouter), 60);
+        oracle.setScore(tx.origin, 60);
 
         PoolId poolId = key.toId();
         // fee = 3000 + 12000 * (60-40) / 40 = 3000 + 6000 = 9000
         vm.expectEmit(true, true, false, true);
-        emit GradientShieldHook.FeeEscalated(poolId, address(botRouter), 3000, 9000);
+        emit GradientShieldHook.FeeEscalated(poolId, tx.origin, 3000, 9000);
         _swap(botRouter, true, -100);
     }
 
     function test_feeCurve_score79_maxBeforeReject() public {
         // Score 79: highest fee before rejection
         vm.prank(avs);
-        oracle.setScore(address(botRouter), 79);
+        oracle.setScore(tx.origin, 79);
 
         PoolId poolId = key.toId();
         // fee = 3000 + 12000 * (79-40) / 40 = 3000 + 11700 = 14700
         vm.expectEmit(true, true, false, true);
-        emit GradientShieldHook.FeeEscalated(poolId, address(botRouter), 3000, 14700);
+        emit GradientShieldHook.FeeEscalated(poolId, tx.origin, 3000, 14700);
         _swap(botRouter, true, -100);
     }
 
     function test_feeCurve_score80_rejected() public {
         // Score 80: exactly at reject threshold
         vm.prank(avs);
-        oracle.setScore(address(botRouter), 80);
+        oracle.setScore(tx.origin, 80);
 
         vm.expectRevert();
         _swap(botRouter, true, -100);
@@ -171,7 +176,7 @@ contract HookEdgeCasesTest is Test, Deployers {
     function test_feeCurve_score100_rejected() public {
         // Score 100: maximum possible
         vm.prank(avs);
-        oracle.setScore(address(botRouter), 100);
+        oracle.setScore(tx.origin, 100);
 
         vm.expectRevert();
         _swap(botRouter, true, -100);
@@ -248,24 +253,28 @@ contract HookEdgeCasesTest is Test, Deployers {
     }
 
     function test_twoBots_sameSandwich() public {
-        // Two different bots each do front-run in same block
-        // Only the one that back-runs with opposite direction gets flagged
+        // Two different bots each front-run in the same block.
+        // Only the one that back-runs in the opposite direction gets flagged,
+        // and it is flagged by trader address — not by the router it used.
         vm.recordLogs();
-        _swap(botRouter, true, -100);       // bot1 front-run
-        _swap(bot2Router, true, -50);       // bot2 front-run
-        _swap(victimRouter, true, -50);     // victim
-        _swap(botRouter, false, -100);      // bot1 back-run (should detect)
+        _swapAsTrader(BOT1, botRouter, true, -100); // bot1 front-run
+        _swapAsTrader(BOT2, bot2Router, true, -50); // bot2 front-run
+        _swapAsTrader(VICTIM, victimRouter, true, -50); // victim
+        _swapAsTrader(BOT1, botRouter, false, -100); // bot1 back-run
 
         Vm.Log[] memory logs = vm.getRecordedLogs();
         bytes32 sandwichSig = keccak256("SandwichDetected(bytes32,address,uint256)");
         bool bot1Detected = false;
+        bool bot2Detected = false;
         for (uint256 i = 0; i < logs.length; i++) {
             if (logs[i].topics[0] == sandwichSig) {
                 address flagged = address(uint160(uint256(logs[i].topics[2])));
-                if (flagged == address(botRouter)) bot1Detected = true;
+                if (flagged == BOT1) bot1Detected = true;
+                if (flagged == BOT2) bot2Detected = true;
             }
         }
-        assertTrue(bot1Detected, "Bot1 sandwich should be detected");
+        assertTrue(bot1Detected, "bot1 round-tripped, so bot1 is flagged");
+        assertFalse(bot2Detected, "bot2 never reversed direction, so it is not flagged");
     }
 
     function test_sandwichDetection_resetsAcrossBlocks() public {
@@ -354,53 +363,47 @@ contract HookEdgeCasesTest is Test, Deployers {
     //  EVASION ATTEMPTS
     // =====================================================================
 
-    function test_evasion_newRouterResetsScore() public {
-        // Bot gets scored on botRouter, deploys a new router to evade
+    /// A scored bot used to be able to deploy a fresh router and trade with a
+    /// clean slate, because the score was attached to the router. The score now
+    /// follows the trader, so a new router buys the bot nothing.
+    function test_evasion_newRouterDoesNotResetScore() public {
         vm.prank(avs);
-        oracle.setScore(address(botRouter), 85);
+        oracle.setScore(BOT1, 85);
 
-        // Bot's original router is blocked
+        // Blocked through the router it was scored on.
         vm.expectRevert();
-        _swap(botRouter, true, -100);
+        _swapAsTrader(BOT1, botRouter, true, -100);
 
-        // Bot creates new router — score=0, trades freely
+        // Still blocked through a brand-new router.
         PoolSwapTest evasionRouter = new PoolSwapTest(manager);
         token0.approve(address(evasionRouter), type(uint256).max);
         token1.approve(address(evasionRouter), type(uint256).max);
-        _swapWith(evasionRouter, true, -100);
 
-        // BUT if evasion router sandwiches, it gets detected too
-        _swapWith(evasionRouter, true, -100);
-        _swap(victimRouter, true, -50);
+        vm.expectRevert();
+        _swapAsTrader(BOT1, evasionRouter, true, -100);
 
-        vm.recordLogs();
-        _swapWith(evasionRouter, false, -100);
-
-        Vm.Log[] memory logs = vm.getRecordedLogs();
-        bytes32 sandwichSig = keccak256("SandwichDetected(bytes32,address,uint256)");
-        bool detected = false;
-        for (uint256 i = 0; i < logs.length; i++) {
-            if (logs[i].topics[0] == sandwichSig) detected = true;
-        }
-        assertTrue(detected, "Evasion router sandwich should be detected");
+        // And an unrelated trader on that same router is unaffected.
+        _swapAsTrader(VICTIM, evasionRouter, true, -100);
     }
 
-    function test_evasion_botSplitsAcrossRouters() public {
-        // Bot uses router1 for front-run, router2 for back-run
-        // Hook tracks per-sender, so this evades detection
+    /// Splitting a sandwich across two routers used to evade detection entirely,
+    /// because the hook keyed on the router. Identity is now the trader, so
+    /// routing the two legs differently changes nothing.
+    function test_evasion_splittingAcrossRoutersNoLongerWorks() public {
         vm.recordLogs();
-        _swap(botRouter, true, -100);       // front-run via router1
-        _swap(victimRouter, true, -50);     // victim
-        _swap(bot2Router, false, -100);     // back-run via router2
+        _swapAsTrader(BOT1, botRouter, true, -100); // front-run via router 1
+        _swapAsTrader(VICTIM, victimRouter, true, -50); // victim
+        _swapAsTrader(BOT1, bot2Router, false, -100); // back-run via router 2
 
         Vm.Log[] memory logs = vm.getRecordedLogs();
         bytes32 sandwichSig = keccak256("SandwichDetected(bytes32,address,uint256)");
-        bool detected = false;
+        address flagged;
         for (uint256 i = 0; i < logs.length; i++) {
-            if (logs[i].topics[0] == sandwichSig) detected = true;
+            if (logs[i].topics[0] == sandwichSig) {
+                flagged = address(uint160(uint256(logs[i].topics[2])));
+            }
         }
-        // This is a known limitation: split-router sandwich evades per-sender detection
-        assertFalse(detected, "Split-router sandwich evades per-sender detection (known limitation)");
+        assertEq(flagged, BOT1, "the trader is flagged even though the legs used different routers");
     }
 
     // =====================================================================
@@ -410,7 +413,7 @@ contract HookEdgeCasesTest is Test, Deployers {
     function test_staleScore_triggersReevalAfterThreshold() public {
         // Set a score, then warp past STALENESS_THRESHOLD (7 days)
         vm.prank(avs);
-        oracle.setScore(address(botRouter), 50);
+        oracle.setScore(tx.origin, 50);
 
         // Warp 8 days — score decays to 50 - 40 = 10 (clean band)
         // but the record is stale, so _checkStaleness should fire
@@ -435,7 +438,7 @@ contract HookEdgeCasesTest is Test, Deployers {
 
     function test_staleScore_withinThreshold_noReeeval() public {
         vm.prank(avs);
-        oracle.setScore(address(botRouter), 50);
+        oracle.setScore(tx.origin, 50);
 
         // Warp 6 days — within staleness threshold
         vm.warp(block.timestamp + 6 days);
@@ -452,7 +455,7 @@ contract HookEdgeCasesTest is Test, Deployers {
 
     function test_decayedScore_movesFromSuspiciousToClean() public {
         vm.prank(avs);
-        oracle.setScore(address(botRouter), 50);
+        oracle.setScore(tx.origin, 50);
 
         // Day 0: score=50, fee=6000 (suspicious)
         _swap(botRouter, true, -50);
@@ -473,7 +476,7 @@ contract HookEdgeCasesTest is Test, Deployers {
 
     function test_decayedScore_movesFromRejectedToSuspicious() public {
         vm.prank(avs);
-        oracle.setScore(address(botRouter), 90);
+        oracle.setScore(tx.origin, 90);
 
         // Day 0: score=90, REJECTED
         vm.expectRevert();
@@ -486,19 +489,19 @@ contract HookEdgeCasesTest is Test, Deployers {
         PoolId poolId = key.toId();
         // fee = 3000 + 12000 * (75-40) / 40 = 3000 + 10500 = 13500
         vm.expectEmit(true, true, false, true);
-        emit GradientShieldHook.FeeEscalated(poolId, address(botRouter), 3000, 13500);
+        emit GradientShieldHook.FeeEscalated(poolId, tx.origin, 3000, 13500);
         _swap(botRouter, true, -50);
     }
 
     function test_decayedScore_fullRehabilitationToBaseFee() public {
         vm.prank(avs);
-        oracle.setScore(address(botRouter), 100);
+        oracle.setScore(tx.origin, 100);
 
         // Day 20: score = max(100 - 100, 0) = 0
         vm.warp(block.timestamp + 20 days);
         vm.roll(block.number + 1);
 
-        uint16 score = oracle.getScore(address(botRouter));
+        uint16 score = oracle.getScore(tx.origin);
         assertEq(score, 0, "Should be fully decayed");
 
         vm.recordLogs();
@@ -576,23 +579,23 @@ contract HookEdgeCasesTest is Test, Deployers {
 
     function test_hookData_wrongLength_fallsBackToOracle() public {
         vm.prank(avs);
-        oracle.setScore(address(swapRouter), 50);
+        oracle.setScore(tx.origin, 50);
 
         // hookData with wrong length (not 160 bytes) — should fall back to oracle
         bytes memory badHookData = hex"deadbeef";
 
         // fee should be oracle-based: score=50, fee=6000
         vm.expectEmit(true, true, false, true);
-        emit GradientShieldHook.FeeEscalated(key.toId(), address(swapRouter), 3000, 6000);
+        emit GradientShieldHook.FeeEscalated(key.toId(), tx.origin, 3000, 6000);
         swap(key, true, -100, badHookData);
     }
 
     function test_hookData_emptyBytes_usesOracle() public {
         vm.prank(avs);
-        oracle.setScore(address(swapRouter), 50);
+        oracle.setScore(tx.origin, 50);
 
         vm.expectEmit(true, true, false, true);
-        emit GradientShieldHook.FeeEscalated(key.toId(), address(swapRouter), 3000, 6000);
+        emit GradientShieldHook.FeeEscalated(key.toId(), tx.origin, 3000, 6000);
         swap(key, true, -100, ZERO_BYTES);
     }
 
@@ -613,20 +616,21 @@ contract HookEdgeCasesTest is Test, Deployers {
     }
 
     function test_scoredAndCleanUsers_sameBlock() public {
-        // One scored user, one clean, same block
+        // A scored trader and a clean trader in the same block. They share the
+        // pool, and may even share a router — only the scored one pays more.
         vm.prank(avs);
-        oracle.setScore(address(botRouter), 60);
+        oracle.setScore(BOT1, 60);
 
         PoolId poolId = key.toId();
 
         // Bot swap — escalated
         vm.expectEmit(true, true, false, true);
-        emit GradientShieldHook.FeeEscalated(poolId, address(botRouter), 3000, 9000);
-        _swap(botRouter, true, -50);
+        emit GradientShieldHook.FeeEscalated(poolId, BOT1, 3000, 9000);
+        _swapAsTrader(BOT1, botRouter, true, -50);
 
         // Clean swap — no escalation
         vm.recordLogs();
-        _swap(cleanRouter, true, -50);
+        _swapAsTrader(VICTIM, cleanRouter, true, -50);
         Vm.Log[] memory logs = vm.getRecordedLogs();
         bytes32 feeEscalatedSig = keccak256("FeeEscalated(bytes32,address,uint24,uint24)");
         for (uint256 i = 0; i < logs.length; i++) {
@@ -642,13 +646,13 @@ contract HookEdgeCasesTest is Test, Deployers {
         PoolId poolId = key.toId();
 
         vm.expectEmit(true, true, false, false);
-        emit GradientShieldHook.SwapTelemetry(poolId, address(cleanRouter), true, -100, 0, 3000, block.number);
+        emit GradientShieldHook.SwapTelemetry(poolId, tx.origin, true, -100, 0, 3000, block.number);
         _swap(cleanRouter, true, -100);
     }
 
     function test_botRejectedEvent_emitsBeforeRevert() public {
         vm.prank(avs);
-        oracle.setScore(address(botRouter), 85);
+        oracle.setScore(tx.origin, 85);
 
         // The BotRejectedEvent is emitted before the revert
         // We can't expectEmit + expectRevert together, but the revert proves rejection
@@ -663,7 +667,7 @@ contract HookEdgeCasesTest is Test, Deployers {
         _swap(victimRouter, true, -50);
 
         vm.expectEmit(true, true, false, true);
-        emit GradientShieldHook.SandwichDetected(poolId, address(botRouter), block.number);
+        emit GradientShieldHook.SandwichDetected(poolId, tx.origin, block.number);
         _swap(botRouter, false, -100);
     }
 
@@ -672,6 +676,24 @@ contract HookEdgeCasesTest is Test, Deployers {
     // =====================================================================
 
     function _swap(PoolSwapTest router, bool zeroForOne, int256 amount) internal {
+        router.swap(
+            key,
+            SwapParams({
+                zeroForOne: zeroForOne,
+                amountSpecified: amount,
+                sqrtPriceLimitX96: zeroForOne ? MIN_PRICE_LIMIT : MAX_PRICE_LIMIT
+            }),
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false}),
+            ZERO_BYTES
+        );
+    }
+
+    /// @dev Swaps with `trader` as tx.origin while msg.sender stays this test
+    ///      contract, which holds the tokens and approvals. The hook resolves
+    ///      the trader from tx.origin, so this models distinct EOAs without
+    ///      having to fund and approve each one.
+    function _swapAsTrader(address trader, PoolSwapTest router, bool zeroForOne, int256 amount) internal {
+        vm.prank(address(this), trader);
         router.swap(
             key,
             SwapParams({

@@ -40,6 +40,12 @@ contract MEVSimulationTest is Test, Deployers {
 
     address internal avs = address(0xA75);
 
+    // Trader identities — the hook attributes by trader, not by router, so the
+    // clean user is genuinely a different party from the bot.
+    address internal constant BOT = address(0xB01);
+    address internal constant VICTIM = address(0xA01);
+    address internal constant CLEAN = address(0xC1EA);
+
     function setUp() public {
         deployFreshManagerAndRouters();
         oracle = new ScoringOracle(avs);
@@ -101,17 +107,17 @@ contract MEVSimulationTest is Test, Deployers {
         // Step 1: Bot front-runs (sells token0 for token1)
         console2.log("  Step 1: Bot FRONT-RUNS - sells 100 units token0 for token1");
         console2.log("          (pushes price, victim will get worse rate)");
-        _swap(botRouter, true, -100);
+        _swapAsTrader(BOT, botRouter, true, -100);
 
         // Step 2: Victim swaps (gets worse price)
         console2.log("  Step 2: Victim swaps - sells 50 units token0 for token1");
         console2.log("          (victim pays inflated price)");
-        _swap(victimRouter, true, -50);
+        _swapAsTrader(VICTIM, victimRouter, true, -50);
 
         // Step 3: Bot back-runs (opposite direction triggers detection)
         console2.log("  Step 3: Bot BACK-RUNS - sells token1 back for token0");
         console2.log("          >> SandwichDetected event emitted by hook!");
-        _swap(botRouter, false, -100);
+        _swapAsTrader(BOT, botRouter, false, -100);
 
         console2.log("");
         console2.log("  >> Hook detected sandwich: same sender, opposite direction,");
@@ -123,14 +129,14 @@ contract MEVSimulationTest is Test, Deployers {
         console2.log("");
 
         vm.prank(avs);
-        oracle.setScore(address(botRouter), 60);
+        oracle.setScore(BOT, 60);
         console2.log("  AVS sets bot score to 60 (suspicious band)");
         console2.log("  Fee = 3000 + 12000 * (60-40) / 40 = 9000 pips (0.90%%)");
 
         vm.roll(block.number + 1);
 
         console2.log("  Bot tries another swap (sells 50 units token0)...");
-        _swap(botRouter, true, -50);
+        _swapAsTrader(BOT, botRouter, true, -50);
         console2.log("  >> FeeEscalated event: base=3000 -> charged=9000");
 
         // ----- Phase 3: Bot keeps attacking, gets rejected -----
@@ -139,14 +145,14 @@ contract MEVSimulationTest is Test, Deployers {
         console2.log("");
 
         vm.prank(avs);
-        oracle.setScore(address(botRouter), 85);
+        oracle.setScore(BOT, 85);
         console2.log("  AVS bumps bot score to 85 (reject band)");
 
         vm.roll(block.number + 1);
 
         console2.log("  Bot tries to swap again...");
         vm.expectRevert();
-        _swap(botRouter, true, -50);
+        _swapAsTrader(BOT, botRouter, true, -50);
         console2.log("  >> REVERTED with BotRejected(bot, 85)");
         console2.log("  >> Bot cannot trade. Pool is protected.");
 
@@ -156,7 +162,7 @@ contract MEVSimulationTest is Test, Deployers {
         console2.log("");
 
         console2.log("  Clean user (score=0) swaps 50 units token0...");
-        _swap(cleanRouter, true, -50);
+        _swapAsTrader(CLEAN, cleanRouter, true, -50);
         console2.log("  >> Swap succeeded at base fee (3000 pips = 0.30%%)");
         console2.log("  >> No fee escalation for clean addresses.");
 
@@ -180,7 +186,7 @@ contract MEVSimulationTest is Test, Deployers {
         console2.log("");
 
         vm.prank(avs);
-        oracle.setScore(address(botRouter), 90);
+        oracle.setScore(BOT, 90);
         console2.log("  Bot scored 90 - REJECTED");
 
         uint16[7] memory dayMarks = [uint16(0), 1, 2, 4, 8, 12, 18];
@@ -189,7 +195,7 @@ contract MEVSimulationTest is Test, Deployers {
         for (uint256 i = 0; i < dayMarks.length; i++) {
             if (dayMarks[i] > 0) vm.warp(startTime + uint256(dayMarks[i]) * 1 days);
 
-            uint16 score = oracle.getScore(address(botRouter));
+            uint16 score = oracle.getScore(BOT);
             string memory status;
             uint24 fee;
 
@@ -273,7 +279,7 @@ contract MEVSimulationTest is Test, Deployers {
         jitRouter.modifyLiquidity(key, LIQUIDITY_PARAMS, ZERO_BYTES);
 
         console2.log("  Step 2: Victim does a large swap (bot earns fees on it)");
-        _swap(victimRouter, true, -0.5 ether);
+        _swapAsTrader(VICTIM, victimRouter, true, -0.5 ether);
 
         console2.log("  Step 3: JIT bot removes liquidity in the same block");
         console2.log("          >> JITDetected event emitted!");
@@ -298,6 +304,22 @@ contract MEVSimulationTest is Test, Deployers {
     // =====================================================================
     //  Helpers
     // =====================================================================
+
+    /// @dev Swaps with `trader` as tx.origin while msg.sender stays this test
+    ///      contract, which holds the tokens and approvals.
+    function _swapAsTrader(address trader, PoolSwapTest router, bool zeroForOne, int256 amount) internal {
+        vm.prank(address(this), trader);
+        router.swap(
+            key,
+            SwapParams({
+                zeroForOne: zeroForOne,
+                amountSpecified: amount,
+                sqrtPriceLimitX96: zeroForOne ? MIN_PRICE_LIMIT : MAX_PRICE_LIMIT
+            }),
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false}),
+            ZERO_BYTES
+        );
+    }
 
     function _swap(PoolSwapTest router, bool zeroForOne, int256 amount) internal {
         router.swap(

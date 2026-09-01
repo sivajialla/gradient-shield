@@ -213,8 +213,8 @@ contract SandwichAttackSimTest is Test, Deployers {
 
         // AVS quorum confirms: bot scored 65 (suspicious band)
         vm.prank(avs);
-        oracle.setScore(address(botRouter), 65);
-        uint16 botScore = oracle.getScore(address(botRouter));
+        oracle.setScore(tx.origin, 65);
+        uint16 botScore = oracle.getScore(tx.origin);
         uint24 escalatedFee = 3000 + (15000 - 3000) * uint24(botScore - 40) / 40;
 
         console2.log("  BLS quorum verdict: bot score = 65 (SUSPICIOUS)");
@@ -282,7 +282,7 @@ contract SandwichAttackSimTest is Test, Deployers {
         console2.log("");
 
         vm.prank(avs);
-        oracle.setScore(address(botRouter), 85);
+        oracle.setScore(tx.origin, 85);
         console2.log("  BLS quorum bumps bot score to 85 -> REJECT band");
 
         vm.roll(block.number + 1);
@@ -309,7 +309,7 @@ contract SandwichAttackSimTest is Test, Deployers {
 
         for (uint256 i = 0; i < checkDays.length; i++) {
             vm.warp(startTime + uint256(checkDays[i]) * 1 days);
-            uint16 s = oracle.getScore(address(botRouter));
+            uint16 s = oracle.getScore(tx.origin);
             string memory band;
             if (s >= 80) band = "REJECTED";
             else if (s >= 40) band = "SUSPICIOUS";

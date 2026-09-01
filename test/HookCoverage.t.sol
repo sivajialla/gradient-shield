@@ -89,6 +89,11 @@ contract HookCoverageTest is Test, Deployers {
 
     address internal avs = address(0xA75);
 
+    // Trader identities — the hook attributes by trader, not by router.
+    address internal constant BOT1 = address(0xB01);
+    address internal constant BOT2 = address(0xB02);
+    address internal constant VICTIM = address(0xA01);
+
     function setUp() public {
         deployFreshManagerAndRouters();
         oracle = new ScoringOracle(avs);
@@ -165,7 +170,7 @@ contract HookCoverageTest is Test, Deployers {
         assertEq(mockTM.taskCount(), 1, "Should create one scoring task");
 
         MockTaskCreator.TaskCall memory task = mockTM.getTask(0);
-        assertEq(task.subject, address(botRouter), "Task subject should be bot");
+        assertEq(task.subject, tx.origin, "Task subject should be bot");
         assertEq(task.quorumThresholdPercentage, 67, "Should use DETECTION_QUORUM_THRESHOLD");
     }
 
@@ -182,7 +187,7 @@ contract HookCoverageTest is Test, Deployers {
             if (logs[i].topics[0] == taskSig) {
                 found = true;
                 address subject = address(uint160(uint256(logs[i].topics[1])));
-                assertEq(subject, address(botRouter));
+                assertEq(subject, tx.origin);
             }
         }
         assertTrue(found, "ScoreTaskTriggered event should fire");
@@ -201,7 +206,7 @@ contract HookCoverageTest is Test, Deployers {
 
         assertEq(mockTM.taskCount(), 1, "JIT should create one scoring task");
         MockTaskCreator.TaskCall memory task = mockTM.getTask(0);
-        assertEq(task.subject, address(lpRouter), "Task subject should be JIT LP");
+        assertEq(task.subject, tx.origin, "Task subject should be JIT LP");
     }
 
     // =====================================================================
@@ -241,18 +246,19 @@ contract HookCoverageTest is Test, Deployers {
     }
 
     function test_taskCooldown_perAddress() public {
-        // Bot1 sandwich: triggers task for bot1
-        _swap(botRouter, true, -100);
-        _swap(victimRouter, true, -50);
-        _swap(botRouter, false, -100);
+        // Bot1 sandwich: triggers a task for bot1
+        _swapAsTrader(BOT1, botRouter, true, -100);
+        _swapAsTrader(VICTIM, victimRouter, true, -50);
+        _swapAsTrader(BOT1, botRouter, false, -100);
         assertEq(mockTM.taskCount(), 1);
 
-        // Bot2 sandwich in next block: triggers task for bot2 (different address)
+        // Bot2 sandwich in the next block: a different trader, so the cooldown
+        // on bot1 must not suppress it.
         vm.roll(block.number + 1);
-        _swap(bot2Router, true, -100);
-        _swap(victimRouter, true, -50);
-        _swap(bot2Router, false, -100);
-        assertEq(mockTM.taskCount(), 2, "Different bot should get own task regardless of cooldown");
+        _swapAsTrader(BOT2, bot2Router, true, -100);
+        _swapAsTrader(VICTIM, victimRouter, true, -50);
+        _swapAsTrader(BOT2, bot2Router, false, -100);
+        assertEq(mockTM.taskCount(), 2, "Different trader should get own task regardless of cooldown");
     }
 
     // =====================================================================
@@ -277,7 +283,7 @@ contract HookCoverageTest is Test, Deployers {
 
     function test_staleness_decayedToZero_noTask() public {
         vm.prank(avs);
-        oracle.setScore(address(botRouter), 30);
+        oracle.setScore(tx.origin, 30);
 
         // Warp 8 days: score decays to max(30-40, 0) = 0
         // score=0 means `if (score > 0) _checkStaleness(sender)` won't fire
@@ -291,7 +297,7 @@ contract HookCoverageTest is Test, Deployers {
 
     function test_staleness_triggersTaskWhenScoreStillPositive() public {
         vm.prank(avs);
-        oracle.setScore(address(botRouter), 60); // decays to 60-40=20 after 8 days
+        oracle.setScore(tx.origin, 60); // decays to 60-40=20 after 8 days
 
         vm.warp(block.timestamp + 8 days);
         vm.roll(block.number + 1);
@@ -306,7 +312,7 @@ contract HookCoverageTest is Test, Deployers {
 
     function test_staleness_noTaskWhenFresh() public {
         vm.prank(avs);
-        oracle.setScore(address(botRouter), 50);
+        oracle.setScore(tx.origin, 50);
 
         // Only 1 day later — well within staleness threshold
         vm.warp(block.timestamp + 1 days);
@@ -340,11 +346,11 @@ contract HookCoverageTest is Test, Deployers {
         token0.approve(address(r), type(uint256).max);
         token1.approve(address(r), type(uint256).max);
         vm.prank(avs);
-        oracle.setScore(address(r), 50);
+        oracle.setScore(tx.origin, 50);
 
         PoolId poolId = key.toId();
         vm.expectEmit(true, true, false, true);
-        emit GradientShieldHook.FeeEscalated(poolId, address(r), 3000, 6000);
+        emit GradientShieldHook.FeeEscalated(poolId, tx.origin, 3000, 6000);
         _swapWith(r, true, -50);
     }
 
@@ -353,11 +359,11 @@ contract HookCoverageTest is Test, Deployers {
         token0.approve(address(r), type(uint256).max);
         token1.approve(address(r), type(uint256).max);
         vm.prank(avs);
-        oracle.setScore(address(r), 79);
+        oracle.setScore(tx.origin, 79);
 
         PoolId poolId = key.toId();
         vm.expectEmit(true, true, false, true);
-        emit GradientShieldHook.FeeEscalated(poolId, address(r), 3000, 14700);
+        emit GradientShieldHook.FeeEscalated(poolId, tx.origin, 3000, 14700);
         _swapWith(r, true, -50);
     }
 
@@ -380,7 +386,7 @@ contract HookCoverageTest is Test, Deployers {
 
     function test_beforeSwap_fullFlow_escalatedUser() public {
         vm.prank(avs);
-        oracle.setScore(address(botRouter), 65);
+        oracle.setScore(tx.origin, 65);
 
         vm.recordLogs();
         _swap(botRouter, true, -100);
@@ -400,7 +406,7 @@ contract HookCoverageTest is Test, Deployers {
 
     function test_beforeSwap_rejectedUser_emitsThenReverts() public {
         vm.prank(avs);
-        oracle.setScore(address(botRouter), 85);
+        oracle.setScore(tx.origin, 85);
 
         vm.expectRevert();
         _swap(botRouter, true, -100);
@@ -491,18 +497,18 @@ contract HookCoverageTest is Test, Deployers {
         _swap(botRouter, false, -100);
 
         assertEq(mockTM.taskCount(), 1);
-        assertEq(mockTM.getTask(0).subject, address(botRouter));
+        assertEq(mockTM.getTask(0).subject, tx.origin);
 
         // Step 2: AVS scores the bot (simulating quorum response)
         vm.prank(avs);
-        oracle.setScore(address(botRouter), 65);
+        oracle.setScore(tx.origin, 65);
 
         // Step 3: Bot's next swap gets escalated fee
         vm.roll(block.number + 1);
         PoolId poolId = key.toId();
 
         vm.expectEmit(true, true, false, true);
-        emit GradientShieldHook.FeeEscalated(poolId, address(botRouter), 3000, 10500);
+        emit GradientShieldHook.FeeEscalated(poolId, tx.origin, 3000, 10500);
         _swap(botRouter, true, -50);
     }
 
@@ -513,7 +519,7 @@ contract HookCoverageTest is Test, Deployers {
         lpRouter.modifyLiquidity(key, REMOVE_LIQUIDITY_PARAMS, ZERO_BYTES);
 
         assertEq(mockTM.taskCount(), 1);
-        assertEq(mockTM.getTask(0).subject, address(lpRouter));
+        assertEq(mockTM.getTask(0).subject, tx.origin);
     }
 
     // =====================================================================
@@ -525,12 +531,12 @@ contract HookCoverageTest is Test, Deployers {
         // If the flag wasn't set, the pool would use its static fee instead
         // We verify indirectly: a scored user should pay the escalated fee
         vm.prank(avs);
-        oracle.setScore(address(botRouter), 60);
+        oracle.setScore(tx.origin, 60);
 
         PoolId poolId = key.toId();
         vm.expectEmit(true, true, false, true);
         // fee = 3000 + 12000 * (60-40) / 40 = 9000
-        emit GradientShieldHook.FeeEscalated(poolId, address(botRouter), 3000, 9000);
+        emit GradientShieldHook.FeeEscalated(poolId, tx.origin, 3000, 9000);
         _swap(botRouter, true, -50);
     }
 
@@ -640,12 +646,12 @@ contract HookCoverageTest is Test, Deployers {
 
         // zeroForOne = true
         vm.expectEmit(true, true, false, false);
-        emit GradientShieldHook.SwapTelemetry(poolId, address(cleanRouter), true, -50, 0, 3000, block.number);
+        emit GradientShieldHook.SwapTelemetry(poolId, tx.origin, true, -50, 0, 3000, block.number);
         _swap(cleanRouter, true, -50);
 
         // zeroForOne = false
         vm.expectEmit(true, true, false, false);
-        emit GradientShieldHook.SwapTelemetry(poolId, address(cleanRouter), false, -50, 0, 3000, block.number);
+        emit GradientShieldHook.SwapTelemetry(poolId, tx.origin, false, -50, 0, 3000, block.number);
         _swap(cleanRouter, false, -50);
     }
 
@@ -654,6 +660,23 @@ contract HookCoverageTest is Test, Deployers {
     // =====================================================================
 
     function _swap(PoolSwapTest router, bool zeroForOne, int256 amount) internal {
+        router.swap(
+            key,
+            SwapParams({
+                zeroForOne: zeroForOne,
+                amountSpecified: amount,
+                sqrtPriceLimitX96: zeroForOne ? MIN_PRICE_LIMIT : MAX_PRICE_LIMIT
+            }),
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false}),
+            ZERO_BYTES
+        );
+    }
+
+    /// @dev Swaps with `trader` as tx.origin. msg.sender stays this test
+    ///      contract, which holds the tokens, so distinct traders can be
+    ///      modelled without funding each EOA.
+    function _swapAsTrader(address trader, PoolSwapTest router, bool zeroForOne, int256 amount) internal {
+        vm.prank(address(this), trader);
         router.swap(
             key,
             SwapParams({
@@ -740,32 +763,32 @@ contract HookAttestorCoverageTest is Test, Deployers {
     function test_attestation_validScore_overridesOracle() public {
         // Oracle says 0, attestation says 50
         vm.prank(avs);
-        oracle.setScore(address(swapRouter), 0);
+        oracle.setScore(tx.origin, 0);
 
-        bytes memory hookData = _signAttestation(address(swapRouter), 50, uint64(block.timestamp + 1 hours));
+        bytes memory hookData = _signAttestation(tx.origin, 50, uint64(block.timestamp + 1 hours));
 
         PoolId poolId = key.toId();
         vm.expectEmit(true, true, false, true);
-        emit GradientShieldHook.FeeEscalated(poolId, address(swapRouter), 3000, 6000);
+        emit GradientShieldHook.FeeEscalated(poolId, tx.origin, 3000, 6000);
         swap(key, true, -100, hookData);
     }
 
     function test_attestation_expired_fallsToOracle() public {
         vm.prank(avs);
-        oracle.setScore(address(swapRouter), 60);
+        oracle.setScore(tx.origin, 60);
 
-        bytes memory hookData = _signAttestation(address(swapRouter), 0, uint64(block.timestamp - 1));
+        bytes memory hookData = _signAttestation(tx.origin, 0, uint64(block.timestamp - 1));
 
         // Expired → falls back to oracle (score=60, fee=9000)
         PoolId poolId = key.toId();
         vm.expectEmit(true, true, false, true);
-        emit GradientShieldHook.FeeEscalated(poolId, address(swapRouter), 3000, 9000);
+        emit GradientShieldHook.FeeEscalated(poolId, tx.origin, 3000, 9000);
         swap(key, true, -100, hookData);
     }
 
     function test_attestation_wrongSigner_fallsToOracle() public {
         vm.prank(avs);
-        oracle.setScore(address(swapRouter), 55);
+        oracle.setScore(tx.origin, 55);
 
         // Sign with wrong key
         uint256 wrongPk = 0xBAD;
@@ -780,13 +803,13 @@ contract HookAttestorCoverageTest is Test, Deployers {
         // fee = 3000 + 12000 * (55-40) / 40 = 3000 + 4500 = 7500
         PoolId poolId = key.toId();
         vm.expectEmit(true, true, false, true);
-        emit GradientShieldHook.FeeEscalated(poolId, address(swapRouter), 3000, 7500);
+        emit GradientShieldHook.FeeEscalated(poolId, tx.origin, 3000, 7500);
         swap(key, true, -100, hookData);
     }
 
     function test_attestation_wrongLength_fallsToOracle() public {
         vm.prank(avs);
-        oracle.setScore(address(swapRouter), 45);
+        oracle.setScore(tx.origin, 45);
 
         // 4 bytes, not 160
         bytes memory hookData = hex"deadbeef";
@@ -794,19 +817,19 @@ contract HookAttestorCoverageTest is Test, Deployers {
         // fee = 3000 + 12000 * (45-40) / 40 = 3000 + 1500 = 4500
         PoolId poolId = key.toId();
         vm.expectEmit(true, true, false, true);
-        emit GradientShieldHook.FeeEscalated(poolId, address(swapRouter), 3000, 4500);
+        emit GradientShieldHook.FeeEscalated(poolId, tx.origin, 3000, 4500);
         swap(key, true, -100, hookData);
     }
 
     function test_attestation_rejectsBot() public {
-        bytes memory hookData = _signAttestation(address(swapRouter), 90, uint64(block.timestamp + 1 hours));
+        bytes memory hookData = _signAttestation(tx.origin, 90, uint64(block.timestamp + 1 hours));
 
         vm.expectRevert();
         swap(key, true, -100, hookData);
     }
 
     function test_attestation_cleanScore_baseFee() public {
-        bytes memory hookData = _signAttestation(address(swapRouter), 10, uint64(block.timestamp + 1 hours));
+        bytes memory hookData = _signAttestation(tx.origin, 10, uint64(block.timestamp + 1 hours));
 
         // Attested score=10, clean → base fee, no escalation
         vm.recordLogs();

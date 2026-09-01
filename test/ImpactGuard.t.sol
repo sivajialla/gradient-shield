@@ -295,7 +295,7 @@ contract ImpactGuardTest is Test, Deployers {
     }
 
     function test_poolImpactGuard_feeOverridesScoreFee() public {
-        oracle.setScore(address(botRouter), 50);
+        oracle.setScore(tx.origin, 50);
 
         _swapAs(user1, user1Router, true, -5 ether);
         _swapAs(user2, user2Router, true, -5 ether);
@@ -486,7 +486,8 @@ contract ImpactGuardTest is Test, Deployers {
     // =====================================================================
 
     function _swapAs(address actor, PoolSwapTest router, bool zeroForOne, int256 amount) internal {
-        vm.prank(actor);
+        // Two-arg prank sets tx.origin too, so each actor is a distinct trader.
+        vm.prank(actor, actor);
         router.swap(
             key,
             SwapParams({

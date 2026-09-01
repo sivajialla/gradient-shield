@@ -68,34 +68,34 @@ contract HookBehaviorTest is Test, Deployers {
         PoolId poolId = key.toId();
 
         vm.expectEmit(true, true, false, false);
-        emit GradientShieldHook.SwapTelemetry(poolId, address(swapRouter), true, -100, 0, 3000, block.number);
+        emit GradientShieldHook.SwapTelemetry(poolId, tx.origin, true, -100, 0, 3000, block.number);
 
         swap(key, true, -100, ZERO_BYTES);
     }
 
     function test_escalatedFeeForSuspiciousSwapper() public {
         vm.prank(avs);
-        oracle.setScore(address(swapRouter), 50);
+        oracle.setScore(tx.origin, 50);
 
         PoolId poolId = key.toId();
 
         // Continuous fee curve: fee = 3000 + (15000-3000) * (50-40) / (80-40) = 6000
         vm.expectEmit(true, true, false, true);
-        emit GradientShieldHook.FeeEscalated(poolId, address(swapRouter), 3000, 6000);
+        emit GradientShieldHook.FeeEscalated(poolId, tx.origin, 3000, 6000);
 
         swap(key, true, -100, ZERO_BYTES);
     }
 
     function test_rejectBotAboveThreshold() public {
         vm.prank(avs);
-        oracle.setScore(address(swapRouter), 85);
+        oracle.setScore(tx.origin, 85);
 
         vm.expectRevert(
             abi.encodeWithSelector(
                 CustomRevert.WrappedError.selector,
                 address(hook),
                 IHooks.beforeSwap.selector,
-                abi.encodeWithSelector(GradientShieldHook.BotRejected.selector, address(swapRouter), uint16(85)),
+                abi.encodeWithSelector(GradientShieldHook.BotRejected.selector, tx.origin, uint16(85)),
                 abi.encodeWithSelector(Hooks.HookCallFailed.selector)
             )
         );

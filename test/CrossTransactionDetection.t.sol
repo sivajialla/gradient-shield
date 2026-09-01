@@ -118,7 +118,7 @@ contract CrossTransactionDetectionTest is Test, Deployers {
     function test_detectionState_livesInPersistentStorage() public {
         _swapAs(bot, botRouter, true, -3 ether);
 
-        bytes32 slot = _senderImpactSlot(key.toId(), address(botRouter));
+        bytes32 slot = _senderImpactSlot(key.toId(), bot);
         uint256 packed = uint256(vm.load(address(hook), slot));
 
         assertTrue(packed != 0, "detection state must survive in persistent storage");
@@ -127,7 +127,7 @@ contract CrossTransactionDetectionTest is Test, Deployers {
         uint256 payload = packed & ((1 << 192) - 1);
 
         assertEq(storedBlock, block.number, "entry is stamped with the writing block");
-        assertEq(payload, 3 ether, "payload is the sender's cumulative volume");
+        assertEq(payload, 3 ether, "payload is the trader's cumulative volume");
     }
 
     /// A stale entry from an earlier block must read as empty — this is what
@@ -135,7 +135,7 @@ contract CrossTransactionDetectionTest is Test, Deployers {
     function test_blockStamp_makesStaleEntriesReadAsEmpty() public {
         _swapAs(bot, botRouter, true, -4 ether);
 
-        bytes32 slot = _senderImpactSlot(key.toId(), address(botRouter));
+        bytes32 slot = _senderImpactSlot(key.toId(), bot);
         uint256 blockN = uint256(vm.load(address(hook), slot)) >> 192;
         assertEq(blockN, block.number);
 
@@ -254,7 +254,8 @@ contract CrossTransactionDetectionTest is Test, Deployers {
     }
 
     function _swapAs(address actor, PoolSwapTest router, bool zeroForOne, int256 amount) internal {
-        vm.prank(actor);
+        // Two-arg prank sets tx.origin too, so each actor is a distinct trader.
+        vm.prank(actor, actor);
         router.swap(
             key,
             SwapParams({

@@ -10,7 +10,7 @@ score exists.
 
 # Project Number : HK-UHI10-1050
 
-> **220 tests passing, 0 skipped** across 18 test suites. Hook logic, BLS quorum
+> **234 tests passing, 0 skipped** across 19 test suites. Hook logic, BLS quorum
 > verification with real BN254 aggregate signatures, oracle decay, sandwich/JIT
 > detection, impact guards, hookData attestation, multi-hop ERC6909 settlement,
 > access control, edge cases, and the full escalation flow are implemented and
@@ -26,10 +26,10 @@ penalized:
 
 | Layer | When it acts | What it does |
 |:-----:|:------------:|--------------|
-| **1. Sender Volume Fees** | Same block (first trade) | Tracks per-sender volume per pool per block. Past **5 ETH** the fee escalates: 1.50% (5-10 ETH), 3.00% (10-20 ETH), 5.00% (20+ ETH) — making the back-run progressively unprofitable while keeping the system **fully permissionless**. |
-| **2. Pool Impact Guard** | Same block (first trade) | Tracks cumulative volume across all senders per pool per block. When total volume exceeds **10 ETH**, subsequent swaps pay a **1.50% penalty fee**, making the back-run unprofitable. |
+| **1. Trader Volume Fees** | Same block (first trade) | Tracks per-**trader** volume per pool per block (routers are not identities). Past **5 ETH** the fee escalates: 1.50% (5-10 ETH), 3.00% (10-20 ETH), 5.00% (20+ ETH) — making the back-run progressively unprofitable while keeping the system **fully permissionless**. |
+| **2. Pool Impact Guard** | Same block (first trade) | Tracks cumulative volume across all traders per pool per block. When total volume exceeds **10 ETH**, subsequent swaps pay a **1.50% penalty fee**, making the back-run unprofitable. |
 | **3. Sandwich/JIT Detection** | Same block | Uses **block-scoped on-chain state** to detect same-block buy→victim→sell patterns and same-block add→swap→remove JIT liquidity. Emits detection events and auto-triggers AVS scoring tasks. |
-| **4. Continuous Fee Curve** | Every swap | Maps the sender's **0-100 risk score** onto a fee: clean (0-39) pays 0.30%, suspicious (40-79) pays up to 1.50%, confirmed toxic (80+) is rejected outright. |
+| **4. Continuous Fee Curve** | Every swap | Maps the trader's **0-100 risk score** onto a fee: clean (0-39) pays 0.30%, suspicious (40-79) pays up to 1.50%, confirmed toxic (80+) is rejected outright. |
 | **5. AVS Scoring (BLS Quorum)** | Asynchronous | EigenLayer operators read on-chain detection events, compute scores independently, reach BLS consensus, and write the verified score to the oracle — affecting all future swaps. |
 
 **Key insight:** Layers 1-3 act on the *first ever* trade. No reputation history
@@ -72,7 +72,7 @@ This is verified against a live chain, not just in tests — see
 flowchart LR
     subgraph ON-CHAIN
         A[Swapper] -->|"swap()"| B[PoolManager]
-        B -->|"sender"| C["GradientShieldHook\nbeforeSwap()"]
+        B -->|"sender = router"| C["GradientShieldHook\nbeforeSwap()\nresolves trader"]
         C -->|"getScore()"| D[ScoringOracle]
         D -->|"uint16"| C
 
@@ -115,10 +115,13 @@ sequenceDiagram
 
     Note over User,Ops: SYNCHRONOUS — same transaction
 
-    User->>PM: swap()
-    PM->>Hook: beforeSwap(sender, key, params)
+    User->>PM: swap() via a router
+    PM->>Hook: beforeSwap(sender = router, key, params)
 
-    Hook->>Oracle: getScore(sender)
+    Note over Hook: Identity: _resolveTrader(sender, hookData)<br/>trusted router's originator, else tx.origin
+    Hook->>Hook: trader = _resolveTrader(...)
+
+    Hook->>Oracle: getScore(trader)
     Oracle-->>Hook: score (0–100, decay-adjusted)
 
     alt score >= 80
@@ -126,22 +129,22 @@ sequenceDiagram
     end
 
     alt score > 0 AND lastUpdated > 7 days
-        Hook->>TM: createScoreTask(sender, "stale")
+        Hook->>TM: createScoreTask(trader, "stale")
     end
 
     Note over Hook: Sandwich detection (block-scoped state)
     alt opposite-direction swap + victim in same block
         Hook->>Hook: emit SandwichDetected
-        Hook->>TM: createScoreTask(sender, "sandwich")
+        Hook->>TM: createScoreTask(trader, "sandwich")
     end
 
     Hook->>Hook: _computeFee(score)
 
     Note over Hook: Impact guards (block-scoped state)
     alt _pendingScoreFlag set from prior block
-        Hook->>TM: createScoreTask(sender, "impact")
+        Hook->>TM: createScoreTask(trader, "impact")
     end
-    alt sender cumulative > SENDER_VOLUME_THRESHOLD
+    alt trader cumulative > SENDER_VOLUME_THRESHOLD
         Hook->>Hook: escalate fee (1.50% → 3.00% → 5.00%)
         Hook->>Hook: emit SenderImpactCapped
     end
@@ -181,6 +184,58 @@ fee = BASE_FEE + (MAX_ESCALATED_FEE - BASE_FEE) × (score - 40) / (80 - 40)
 | **60** | Suspicious | 9000 (0.90%) | 3x base |
 | **75** | Suspicious (high) | 13500 (1.35%) | 4.5x base |
 | **80-100** | Confirmed toxic | — | **Reverts** `BotRejected` |
+
+---
+
+## Trader identity: who actually gets scored
+
+Every fee, score, detection and volume budget is attributed to the **trader** —
+never to the router.
+
+This is not cosmetic. Uniswap v4 passes `beforeSwap` whoever called
+`poolManager.swap()`, which in practice is a router. Keying on that address
+collapses everyone behind a shared router into a single identity, and the
+consequences are severe:
+
+- An honest user **inherits a bot's per-block volume** and pays its penalty fee.
+- The router itself **accumulates score** until it crosses the reject threshold,
+  at which point `BotRejected` bricks the pool for every user behind it.
+
+`_resolveTrader` resolves identity in this order:
+
+| # | Source | When it applies |
+|:-:|--------|-----------------|
+| 1 | Originator declared by a **trusted router** in `hookData` | Router is registered via `setTrustedRouter`. The only path that stays correct under ERC-4337, where `tx.origin` is the bundler. |
+| 2 | `tx.origin` | Everything else — the EOA that signed the transaction. |
+
+A router is believed only if the owner has vetted it, and only if the router
+**writes the originator itself** rather than forwarding caller-supplied bytes —
+otherwise a bot would simply declare a clean address. `test_untrustedRouter_
+cannotSpoofOriginator` pins that down.
+
+> **On `tx.origin`:** it is used here for *attribution and pricing*, never for
+> authorization, so the usual phishing objection does not apply — the worst case
+> is that an address is charged for a swap its own signature authorised. It also
+> cannot be forged without the victim's private key.
+
+The owner's only power is marking routers as originator-forwarding. It cannot
+set scores, change fees, reject addresses, or move funds, and can be renounced
+with `renounceOwnership()`.
+
+What this buys, measured live (see [the demo](#running-the-live-demo)) with a bot
+and a victim trading through **the same router in the same block**:
+
+```
+  bot     buy     4.0 -> 10500 pips (1.05%)  <-- penalised
+  victim  buy     1.0 ->  3000 pips (0.30%)
+  bot     sell    4.0 -> 15000 pips (1.50%)  <-- penalised
+
+  Flagged for sandwiching: bot
+  router score = 0
+```
+
+`test/TraderIdentity.t.sol` covers this, including both original failure modes,
+the trusted-router path, and spoofing attempts.
 
 ---
 
@@ -371,7 +426,7 @@ Uses EigenLayer's BLS signature infrastructure for decentralized score consensus
 
 | Limitation | Why | Mitigation |
 |------------|-----|------------|
-| **Identity is the router, not the trader** | In v4 the `sender` passed to `beforeSwap` is whoever called `poolManager.swap()` — a router, not the EOA. Behind a shared router every trader collapses into one identity: an honest user can inherit a bot's volume, and the router itself accumulates score. **This is the most important open issue.** | Resolve the real trader from `hookData` (the attestation plumbing already exists), or restrict the pool to routers that forward the originator. Not yet implemented. |
+| **ERC-4337 without a trusted router** | For a bundled UserOp `tx.origin` is the bundler, so smart-account users behind an untrusted router share the bundler's identity | Register the account's router as trusted so it declares the real originator — see [Trader identity](#trader-identity-who-actually-gets-scored) |
 | **Cross-block sandwich** | Detection state resets each block, so a buy in block N and sell in block N+1 is not detected | AVS operators can detect cross-block patterns off-chain and score accordingly |
 | **Fresh wallet evasion** | Attacker uses a new address for each attack to avoid score accumulation | Impact guards (layers 1-2) price every attempt regardless of address, so a fresh wallet still pays the escalated fee on its back-run |
 | **Split-address attacks** | Splitting volume across several addresses to stay under the sender threshold | Pool impact guard (layer 2) catches aggregate volume across all senders |
@@ -384,7 +439,7 @@ Uses EigenLayer's BLS signature infrastructure for decentralized score consensus
 
 | Component | Layer | Responsibility |
 |-----------|:-----:|----------------|
-| `GradientShieldHook` | on-chain | v4 hook. Reads scores, applies fee curve, detects sandwich/JIT, enforces impact guards, auto-triggers BLS tasks, emits telemetry. |
+| `GradientShieldHook` | on-chain | v4 hook. Resolves the trader behind the router, reads scores, applies fee curve, detects sandwich/JIT, enforces impact guards, auto-triggers BLS tasks, emits telemetry. |
 | `ScoringOracle` | on-chain | Per-address score store with 5-point/day linear decay. Reads open; writes AVS-gated. |
 | `BLSQuorumTaskManager` | on-chain | **The runnable AVS.** Own operator registry + real BN254 aggregate signature verification via the pairing precompile. Deploys on bare anvil — no EigenLayer infra. |
 | `GradientShieldTaskManager` | on-chain | EigenLayer-backed variant. Same crypto, but quorum weight comes from the StakeRegistry and it needs the full middleware stack deployed. |
@@ -432,7 +487,7 @@ forge build
 forge test
 ```
 
-All 220 tests should pass:
+All 234 tests should pass:
 
 | Suite | Tests | What it covers |
 |-------|:-----:|----------------|
@@ -450,6 +505,7 @@ All 220 tests should pass:
 | `HookBehavior.t.sol` | 5 | Fee ladder, dynamic fee override, permissions |
 | `HookDataAttestation.t.sol` | 5 | ECDSA attestation via hookData, fallback paths |
 | `DemoSimulation.t.sol` | 5 | End-to-end scoring scenarios with BLS quorum |
+| `TraderIdentity.t.sol` | 14 | **Trader vs router attribution**, trusted-router path, spoofing attempts |
 | `CrossTransactionDetection.t.sol` | 5 | Detection state persists across transactions (regression guard) |
 | `MEVSimulation.t.sol` | 4 | MEV attack simulations |
 | `MultiHopSwap.t.sol` | 3 | ERC6909 multi-hop settlement |
@@ -514,13 +570,21 @@ Expected output in terminal 4:
   SenderImpactCapped:  1
   FeeEscalated:        1
 
-  Fee charged per leg:
-    buy       4.0 -> 3000 pips (0.30%)
-    buy       1.0 -> 3000 pips (0.30%)
-    sell      4.0 -> 15000 pips (1.50%)  <-- penalised
+  Who the hook charged, and how much:
+    bot     buy     4.0 ->  3000 pips (0.30%)
+    victim  buy     1.0 ->  3000 pips (0.30%)
+    bot     sell    4.0 -> 15000 pips (1.50%)  <-- penalised
+
+  Flagged for sandwiching: bot
 
   ScoreTaskTriggered:  1
+
+  The router itself is never scored:
+    router 0xB7f8…4F5e score = 0
 ```
+
+The bot and the victim are **separate EOAs sharing one router** — the exact case
+that used to defeat the hook.
 
 And in terminal 3, the quorum closing the loop:
 
@@ -536,8 +600,9 @@ Task 0 — scoring 0xB7f8...4F5e
   Oracle score is now: 65
 ```
 
-Run `make attack` a second time and every leg is now priced at 1.05% instead of
-0.30% — the quorum's verdict feeding back into the hook. Check any address with:
+Run `make attack` a second time and the bot's legs are priced at 1.05% and 1.50%
+while the victim still pays 0.30% — the quorum's verdict feeding back into the
+hook, applied to the trader alone. Check any address with:
 
 ```bash
 make score ADDR=0x...
@@ -548,7 +613,7 @@ make score ADDR=0x...
 ```bash
 make help               # list all available targets
 make install            # install Solidity + Node.js deps
-make test               # run all 220 tests
+make test               # run all 234 tests
 make demo-bls           # BLS quorum integration suite (real signatures)
 make demo-fee           # trace showing PoolManager charging the escalated fee
 make demo               # 5-scenario reputation walkthrough

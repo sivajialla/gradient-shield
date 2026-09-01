@@ -85,7 +85,7 @@ contract MEVAttackDefenseTest is Test, Deployers {
         _swapVia(victimRouter, true, -10);
 
         vm.expectEmit(true, true, false, true);
-        emit GradientShieldHook.SandwichDetected(poolId, address(botRouter), block.number);
+        emit GradientShieldHook.SandwichDetected(poolId, tx.origin, block.number);
         _swapVia(botRouter, false, -10);
     }
 
@@ -111,23 +111,23 @@ contract MEVAttackDefenseTest is Test, Deployers {
         _swapVia(victimRouter, true, -10);
 
         vm.expectEmit(true, true, false, true);
-        emit GradientShieldHook.SandwichDetected(poolId, address(botRouter), block.number);
+        emit GradientShieldHook.SandwichDetected(poolId, tx.origin, block.number);
         _swapVia(botRouter, false, -10);
 
         // 2. AVS scores the bot at 60 (suspicious band).
         vm.prank(avs);
-        oracle.setScore(address(botRouter), 60);
-        assertEq(oracle.getScore(address(botRouter)), 60);
+        oracle.setScore(tx.origin, 60);
+        assertEq(oracle.getScore(tx.origin), 60);
 
         // 3. Bot's next swap pays 3x fee.
         vm.roll(block.number + 1);
         vm.expectEmit(true, true, false, true);
-        emit GradientShieldHook.FeeEscalated(poolId, address(botRouter), 3000, 9000);
+        emit GradientShieldHook.FeeEscalated(poolId, tx.origin, 3000, 9000);
         _swapVia(botRouter, true, -10);
 
         // 4. AVS escalates to 95 (reject band).
         vm.prank(avs);
-        oracle.setScore(address(botRouter), 95);
+        oracle.setScore(tx.origin, 95);
 
         // 5. Bot's next swap is rejected.
         vm.roll(block.number + 1);
@@ -136,7 +136,7 @@ contract MEVAttackDefenseTest is Test, Deployers {
                 CustomRevert.WrappedError.selector,
                 address(hook),
                 IHooks.beforeSwap.selector,
-                abi.encodeWithSelector(GradientShieldHook.BotRejected.selector, address(botRouter), uint16(95)),
+                abi.encodeWithSelector(GradientShieldHook.BotRejected.selector, tx.origin, uint16(95)),
                 abi.encodeWithSelector(Hooks.HookCallFailed.selector)
             )
         );
@@ -154,7 +154,7 @@ contract MEVAttackDefenseTest is Test, Deployers {
         _swapVia(victimRouter, true, -10);
 
         vm.expectEmit(true, true, false, true);
-        emit GradientShieldHook.JITDetected(poolId, address(jitLPRouter), block.number);
+        emit GradientShieldHook.JITDetected(poolId, tx.origin, block.number);
         jitLPRouter.modifyLiquidity(key, REMOVE_LIQUIDITY_PARAMS, ZERO_BYTES);
     }
 

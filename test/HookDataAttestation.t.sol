@@ -61,11 +61,11 @@ contract HookDataAttestationTest is Test, Deployers {
         uint16 attestedScore = 50;
         uint64 expiry = uint64(block.timestamp + 1 hours);
 
-        bytes memory hookData = _signAttestation(address(swapRouter), attestedScore, expiry);
+        bytes memory hookData = _signAttestation(tx.origin, attestedScore, expiry);
 
         PoolId poolId = key.toId();
         vm.expectEmit(true, true, false, true);
-        emit GradientShieldHook.FeeEscalated(poolId, address(swapRouter), 3000, 6000);
+        emit GradientShieldHook.FeeEscalated(poolId, tx.origin, 3000, 6000);
 
         swap(key, true, -100, hookData);
     }
@@ -74,7 +74,7 @@ contract HookDataAttestationTest is Test, Deployers {
         uint16 attestedScore = 50;
         uint64 expiry = uint64(block.timestamp - 1);
 
-        bytes memory hookData = _signAttestation(address(swapRouter), attestedScore, expiry);
+        bytes memory hookData = _signAttestation(tx.origin, attestedScore, expiry);
 
         // Expired attestation → falls back to oracle (score=0 → base fee, no FeeEscalated event)
         swap(key, true, -100, hookData);
@@ -87,7 +87,7 @@ contract HookDataAttestationTest is Test, Deployers {
         // Sign with wrong key
         uint256 wrongPk = 0xBAD;
         bytes32 innerHash = keccak256(
-            abi.encodePacked(address(swapRouter), attestedScore, expiry, block.chainid, address(hook))
+            abi.encodePacked(tx.origin, attestedScore, expiry, block.chainid, address(hook))
         );
         bytes32 digest = keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", innerHash));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(wrongPk, digest);
@@ -100,14 +100,14 @@ contract HookDataAttestationTest is Test, Deployers {
     function test_attestedScoreRejectsBotAboveThreshold() public {
         uint16 attestedScore = 85;
         uint64 expiry = uint64(block.timestamp + 1 hours);
-        bytes memory hookData = _signAttestation(address(swapRouter), attestedScore, expiry);
+        bytes memory hookData = _signAttestation(tx.origin, attestedScore, expiry);
 
         vm.expectRevert(
             abi.encodeWithSelector(
                 CustomRevert.WrappedError.selector,
                 address(hook),
                 IHooks.beforeSwap.selector,
-                abi.encodeWithSelector(GradientShieldHook.BotRejected.selector, address(swapRouter), uint16(85)),
+                abi.encodeWithSelector(GradientShieldHook.BotRejected.selector, tx.origin, uint16(85)),
                 abi.encodeWithSelector(Hooks.HookCallFailed.selector)
             )
         );
@@ -116,11 +116,11 @@ contract HookDataAttestationTest is Test, Deployers {
 
     function test_emptyHookDataUsesOracle() public {
         vm.prank(avs);
-        oracle.setScore(address(swapRouter), 50);
+        oracle.setScore(tx.origin, 50);
 
         PoolId poolId = key.toId();
         vm.expectEmit(true, true, false, true);
-        emit GradientShieldHook.FeeEscalated(poolId, address(swapRouter), 3000, 6000);
+        emit GradientShieldHook.FeeEscalated(poolId, tx.origin, 3000, 6000);
 
         swap(key, true, -100, ZERO_BYTES);
     }

@@ -38,6 +38,11 @@ import {IScoreTaskCreator} from "./IScoreTaskCreator.sol";
 /// TaskManager. The BLS operator quorum evaluates flagged addresses, and
 /// quorum-verified scores feed back into fee decisions on subsequent swaps.
 ///
+/// Identity: every score, fee, detection and volume budget is attributed to the
+/// *trader*, resolved by {_resolveTrader} — not to the router that v4 hands the
+/// hook as `sender`. Without this, everyone behind a shared router shares one
+/// reputation.
+///
 /// hookData attestation (optional): swappers can pass a signed score
 /// attestation via hookData to skip the on-chain oracle call. The attestor
 /// signs (sender, score, expiry, chainId, hookAddress) off-chain; the hook
@@ -120,6 +125,17 @@ contract GradientShieldHook is BaseHook, IUnlockCallback {
     ///      explicit reset.
     mapping(bytes32 => uint256) internal _blockState;
 
+    /// @notice Routers trusted to declare the true originator in `hookData`.
+    /// @dev See {_resolveTrader}. Marking a router here asserts that the router
+    ///      writes the originator itself; a router that merely forwards
+    ///      caller-supplied bytes must never be listed.
+    mapping(address => bool) public trustedRouters;
+
+    /// @notice Can only mark routers as originator-forwarding. Deliberately
+    ///         narrow: the owner cannot set scores, change fees, reject
+    ///         addresses, or move funds.
+    address public owner;
+
     // ---------------------------------------------------------------------
     // Events
     // ---------------------------------------------------------------------
@@ -148,6 +164,8 @@ contract GradientShieldHook is BaseHook, IUnlockCallback {
 
     error BotRejected(address swapper, uint16 score);
     error DeadlineExpired();
+    error NotOwner();
+    error ZeroAddress();
 
     // ---------------------------------------------------------------------
     // Constructor
@@ -162,6 +180,38 @@ contract GradientShieldHook is BaseHook, IUnlockCallback {
         oracle = _oracle;
         taskManager = _taskManager;
         attestor = _attestor;
+        owner = msg.sender;
+    }
+
+    // ---------------------------------------------------------------------
+    // Trusted router registry
+    // ---------------------------------------------------------------------
+
+    event TrustedRouterSet(address indexed router, bool trusted);
+    event OwnershipTransferred(address indexed from, address indexed to);
+
+    /// @notice Mark a router as one that declares the true originator in
+    ///         `hookData`. See {_resolveTrader} for the trust assumption.
+    function setTrustedRouter(address router, bool trusted) external {
+        if (msg.sender != owner) revert NotOwner();
+        if (router == address(0)) revert ZeroAddress();
+        trustedRouters[router] = trusted;
+        emit TrustedRouterSet(router, trusted);
+    }
+
+    function transferOwnership(address newOwner) external {
+        if (msg.sender != owner) revert NotOwner();
+        if (newOwner == address(0)) revert ZeroAddress();
+        emit OwnershipTransferred(owner, newOwner);
+        owner = newOwner;
+    }
+
+    /// @notice Renounce the ability to change the trusted-router set, freezing
+    ///         identity resolution to `tx.origin` plus whatever is already set.
+    function renounceOwnership() external {
+        if (msg.sender != owner) revert NotOwner();
+        emit OwnershipTransferred(owner, address(0));
+        owner = address(0);
     }
 
     // ---------------------------------------------------------------------
@@ -283,16 +333,21 @@ contract GradientShieldHook is BaseHook, IUnlockCallback {
         returns (bytes4, BeforeSwapDelta, uint24)
     {
         PoolId poolId = key.toId();
-        uint16 score = _resolveScore(sender, hookData);
+
+        // `sender` is whoever called poolManager.swap() — a router, not the
+        // person trading. Everything below is attributed to the trader.
+        address trader = _resolveTrader(sender, hookData);
+
+        uint16 score = _resolveScore(trader, hookData);
 
         if (score >= REJECT_THRESHOLD) {
-            emit BotRejectedEvent(poolId, sender, score);
-            revert BotRejected(sender, score);
+            emit BotRejectedEvent(poolId, trader, score);
+            revert BotRejected(trader, score);
         }
 
-        if (score > 0) _checkStaleness(sender);
+        if (score > 0) _checkStaleness(trader);
 
-        _detectSandwich(poolId, sender, params.zeroForOne);
+        _detectSandwich(poolId, trader, params.zeroForOne);
 
         uint24 fee = _computeFee(score);
 
@@ -301,14 +356,48 @@ contract GradientShieldHook is BaseHook, IUnlockCallback {
             ? uint256(params.amountSpecified)
             : uint256(-params.amountSpecified);
 
-        uint24 impactFee = _applyImpactGuards(poolId, sender, swapSize);
+        uint24 impactFee = _applyImpactGuards(poolId, trader, swapSize);
         if (impactFee > fee) fee = impactFee;
 
-        if (fee > BASE_FEE) emit FeeEscalated(poolId, sender, BASE_FEE, fee);
+        if (fee > BASE_FEE) emit FeeEscalated(poolId, trader, BASE_FEE, fee);
 
-        emit SwapTelemetry(poolId, sender, params.zeroForOne, params.amountSpecified, score, fee, block.number);
+        emit SwapTelemetry(poolId, trader, params.zeroForOne, params.amountSpecified, score, fee, block.number);
 
         return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, fee | LPFeeLibrary.OVERRIDE_FEE_FLAG);
+    }
+
+    // ---------------------------------------------------------------------
+    // Trader identity resolution
+    // ---------------------------------------------------------------------
+
+    /// @notice Resolves the address a swap should be attributed to.
+    ///
+    /// Uniswap v4 passes the *caller* of `poolManager.swap()` into the hook.
+    /// In practice that is a router, so naively using it collapses every trader
+    /// behind a shared router into one identity: honest users inherit a bot's
+    /// volume, and the router itself accumulates score until it crosses
+    /// {REJECT_THRESHOLD} and bricks the pool for everyone.
+    ///
+    /// Resolution order:
+    ///   1. A **trusted router** that declares the originator in `hookData`.
+    ///      Only routers the owner has vetted are believed, and the router must
+    ///      write this itself rather than forwarding caller-supplied bytes —
+    ///      otherwise a bot would simply declare a clean address. This is the
+    ///      only path that stays correct under ERC-4337, where `tx.origin` is
+    ///      the bundler.
+    ///   2. `tx.origin` — the EOA that signed the transaction.
+    ///
+    /// @dev `tx.origin` is used for *attribution and pricing*, never for
+    ///      authorization, so the usual phishing objection to `tx.origin` does
+    ///      not apply: the worst case is that an address is charged for a swap
+    ///      its own signature authorised. It also cannot be spoofed — forging it
+    ///      would require the victim's private key.
+    function _resolveTrader(address sender, bytes calldata hookData) internal view returns (address) {
+        if (trustedRouters[sender] && hookData.length == 32) {
+            address declared = abi.decode(hookData, (address));
+            if (declared != address(0)) return declared;
+        }
+        return tx.origin;
     }
 
     function _detectSandwich(PoolId poolId, address sender, bool zeroForOne) internal {
@@ -421,17 +510,19 @@ contract GradientShieldHook is BaseHook, IUnlockCallback {
     }
 
     // ---------------------------------------------------------------------
-    // JIT-liquidity detection (transient storage)
+    // JIT-liquidity detection
     // ---------------------------------------------------------------------
 
     function _beforeAddLiquidity(
         address sender,
         PoolKey calldata key,
         ModifyLiquidityParams calldata,
-        bytes calldata
+        bytes calldata hookData
     ) internal override returns (bytes4) {
         PoolId poolId = key.toId();
-        _bstore(_liquiditySlot(poolId, sender), 1);
+        // Attributed to the provider, not the position-manager contract that
+        // relays the call — same reasoning as {_resolveTrader} for swaps.
+        _bstore(_liquiditySlot(poolId, _resolveTrader(sender, hookData)), 1);
         return BaseHook.beforeAddLiquidity.selector;
     }
 
@@ -439,12 +530,13 @@ contract GradientShieldHook is BaseHook, IUnlockCallback {
         address sender,
         PoolKey calldata key,
         ModifyLiquidityParams calldata,
-        bytes calldata
+        bytes calldata hookData
     ) internal override returns (bytes4) {
         PoolId poolId = key.toId();
-        if (_bload(_liquiditySlot(poolId, sender)) == 1) {
-            emit JITDetected(poolId, sender, block.number);
-            _triggerScoreTask(sender, "jit");
+        address provider = _resolveTrader(sender, hookData);
+        if (_bload(_liquiditySlot(poolId, provider)) == 1) {
+            emit JITDetected(poolId, provider, block.number);
+            _triggerScoreTask(provider, "jit");
         }
         return BaseHook.beforeRemoveLiquidity.selector;
     }
