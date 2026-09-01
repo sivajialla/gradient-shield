@@ -631,8 +631,8 @@ was found, since a Foundry test is one transaction and a real sandwich is three.
 ### Clone and build
 
 ```bash
-git clone --recurse-submodules https://github.com/DecentralizedGlasses/Gradient-Shield.git
-cd Gradient-Shield
+git clone --recurse-submodules https://github.com/sivajialla/gradient-shield.git
+cd gradient-shield
 ```
 
 If you already cloned without `--recurse-submodules`:
@@ -712,9 +712,7 @@ anvil
 make deploy-local
 ```
 
-Copy the printed `TASK_MANAGER`, `SCORING_ORACLE`, `HOOK_ADDRESS`,
-`SWAP_ROUTER`, `TOKEN0`, and `TOKEN1` into `operator/.env`
-(start from `cp operator/.env.example operator/.env`).
+This writes `operator/.env` for you — no addresses to copy by hand.
 
 **Terminal 3 — the AVS operator quorum**
 
@@ -832,8 +830,8 @@ export POOL_MANAGER=<sepolia_pool_manager>
 make deploy-sepolia
 ```
 
-The deploy script prints every contract address. Put them in `operator/.env`,
-then `make avs` to start the quorum.
+The deploy script prints every contract address. For testnets, put them in
+`operator/.env` yourself; `make deploy-local` writes that file automatically.
 
 ---
 

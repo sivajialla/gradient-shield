@@ -103,7 +103,7 @@ deploy-local:
 	PRIVATE_KEY=$(LOCAL_KEY) forge script script/DeployLocal.s.sol \
 		--rpc-url $(LOCAL_RPC) --broadcast
 	@echo ""
-	@echo "Copy the printed addresses into operator/.env, then run: make avs"
+	@echo "operator/.env written. Next: 'make avs' in a new terminal, then 'make attack'"
 
 ## keygen: regenerate the demo operator BLS keys (operator/keys.json)
 keygen:
