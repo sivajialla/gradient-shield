@@ -133,4 +133,33 @@ contract HookDataAttestationTest is Test, Deployers {
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(attestorPk, digest);
         return abi.encode(score, expiry, v, r, s);
     }
+
+    /// An attestation must never be able to LOWER a score. Otherwise one
+    /// attestor key is a bypass for the whole reputation system: a single
+    /// signature could zero out a rejected bot and walk it past the gate.
+    function test_attestation_cannotLowerScoreBelowOracle() public {
+        vm.prank(avs);
+        oracle.setScore(tx.origin, 85); // rejected on-chain
+
+        // Attestor signs a clean score for the same address.
+        bytes memory hookData = _signAttestation(tx.origin, 0, uint64(block.timestamp + 1 hours));
+
+        // The on-chain 85 still wins, so the swap is still rejected.
+        vm.expectRevert();
+        swap(key, true, -100, hookData);
+    }
+
+    /// The legitimate use: escalate faster than the quorum can agree.
+    function test_attestation_canRaiseScoreAboveOracle() public {
+        vm.prank(avs);
+        oracle.setScore(tx.origin, 0);
+
+        bytes memory hookData = _signAttestation(tx.origin, 60, uint64(block.timestamp + 1 hours));
+
+        PoolId poolId = key.toId();
+        // score 60 -> 3000 + 12000 * 20/40 = 9000
+        vm.expectEmit(true, true, false, true);
+        emit GradientShieldHook.FeeEscalated(poolId, tx.origin, 3000, 9000);
+        swap(key, true, -100, hookData);
+    }
 }

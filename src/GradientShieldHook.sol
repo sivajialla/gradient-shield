@@ -7,7 +7,6 @@ import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {IUnlockCallback} from "@uniswap/v4-core/src/interfaces/callback/IUnlockCallback.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
-import {BalanceDelta, BalanceDeltaLibrary} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "@uniswap/v4-core/src/types/BeforeSwapDelta.sol";
 import {LPFeeLibrary} from "@uniswap/v4-core/src/libraries/LPFeeLibrary.sol";
 import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
@@ -44,13 +43,13 @@ import {ITrustedRouter} from "./ITrustedRouter.sol";
 /// hook as `sender`. Without this, everyone behind a shared router shares one
 /// reputation.
 ///
-/// hookData attestation (optional): swappers can pass a signed score
-/// attestation via hookData to skip the on-chain oracle call. The attestor
-/// signs (sender, score, expiry, chainId, hookAddress) off-chain; the hook
-/// verifies the ECDSA signature and uses the attested score. Gas cost is
-/// comparable to the oracle path — the value is in avoiding the external
-/// call latency. Falls back to on-chain oracle when hookData is empty, the
-/// attestor is not set, the signature is invalid, or the attestation expired.
+/// hookData attestation (optional): a fast path for *escalation*. An off-chain
+/// watcher that has spotted a bot before the operator quorum has reached
+/// consensus can sign (sender, score, expiry, chainId, hookAddress); the hook
+/// verifies the ECDSA signature and prices the swap on the higher of the
+/// attested and on-chain scores. It can never lower a score — see
+/// {_resolveScore}. Falls back to the oracle when hookData is empty, the
+/// attestor is unset, the signature is invalid, or the attestation expired.
 contract GradientShieldHook is BaseHook, IUnlockCallback {
     // BaseHook provides onlyPoolManager modifier via ImmutableState.
     // IUnlockCallback provides the unlockCallback interface for multi-hop routing.
@@ -544,7 +543,13 @@ contract GradientShieldHook is BaseHook, IUnlockCallback {
         address recovered = ecrecover(digest, v, r, s);
         if (recovered != attestor) return oracle.getScore(sender);
 
-        return score;
+        // An attestation may only RAISE the score, never lower it below what the
+        // quorum has already written. Letting it override downward would turn a
+        // single attestor key into a bypass for the whole reputation system —
+        // one signature could zero out a rejected bot and walk it past the
+        // {REJECT_THRESHOLD} gate.
+        uint16 onchain = oracle.getScore(sender);
+        return score > onchain ? score : onchain;
     }
 
     // ---------------------------------------------------------------------

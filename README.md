@@ -10,7 +10,7 @@ score exists.
 
 # Project Number : HK-UHI10-1050
 
-> **245 tests passing, 0 skipped** across 20 test suites. Hook logic, BLS quorum
+> **247 tests passing, 0 skipped** across 20 test suites. Hook logic, BLS quorum
 > verification with real BN254 aggregate signatures, oracle decay, sandwich/JIT
 > detection, impact guards, hookData attestation, multi-hop ERC6909 settlement,
 > access control, edge cases, and the full escalation flow are implemented and
@@ -548,7 +548,7 @@ command you can actually run — no reading required between them.
 forge test
 ```
 
-245 tests, 20 suites, ~1 second. If this is green the rest of the ladder is
+247 tests, 20 suites, ~1 second. If this is green the rest of the ladder is
 worth your time.
 
 ### 2. Is the fee real, or just an event the hook emits?
@@ -655,7 +655,7 @@ forge build
 forge test
 ```
 
-All 245 tests should pass:
+All 247 tests should pass:
 
 | Suite | Tests | What it covers |
 |-------|:-----:|----------------|
@@ -671,7 +671,7 @@ All 245 tests should pass:
 | `HookAttestorCoverage.t.sol` | 7 | Attestor-related hook paths |
 | `MEVAttackDefense.t.sol` | 6 | Sandwich/JIT detection, full escalation flow |
 | `HookBehavior.t.sol` | 5 | Fee ladder, dynamic fee override, permissions |
-| `HookDataAttestation.t.sol` | 5 | ECDSA attestation via hookData, fallback paths |
+| `HookDataAttestation.t.sol` | 7 | ECDSA attestation, and that it can raise a score but never lower one |
 | `DemoSimulation.t.sol` | 5 | End-to-end scoring scenarios with BLS quorum |
 | `MEVEconomics.t.sol` | 4 | **A/B against a plain pool**: attacker cost, victim impact, LP revenue |
 | `TraderIdentity.t.sol` | 21 | **Trader vs router attribution**, `getMsgSender()` allow-list, spoofing attempts |
@@ -780,7 +780,7 @@ make score ADDR=0x...
 ```bash
 make help               # list all available targets
 make install            # install Solidity + Node.js deps
-make test               # run all 245 tests
+make test               # run all 247 tests
 make demo-bls           # BLS quorum integration suite (real signatures)
 make demo-fee           # trace showing PoolManager charging the escalated fee
 make demo-economics     # same sandwich, two pools: what the guard costs
@@ -801,7 +801,7 @@ make keygen             # regenerate demo operator BLS keys
 ### Local (Foundry)
 
 ```bash
-forge test                                          # all 245 tests
+forge test                                          # all 247 tests
 make demo-fee                                       # PoolManager charges the escalated fee
 make demo-economics                                 # A/B vs a plain pool
 make demo-bls                                       # real BLS aggregate signatures
@@ -884,7 +884,7 @@ forge script script/Deploy.s.sol --rpc-url $RPC_URL --broadcast
 │   ├── IScoreTaskCreator.sol            lightweight hook→TaskManager interface
 │   ├── IGradientShieldTaskManager.sol   task manager interface & structs
 │   └── libraries/BN254Lib.sol           BN254 subset, pragma-compatible with v4
-├── test/                                245 tests, 20 suites
+├── test/                                247 tests, 20 suites
 │   ├── HookEdgeCases.t.sol              edge cases (36)
 │   ├── HookCoverage.t.sol               coverage paths (30 + 7 attestor)
 │   ├── ImpactGuard.t.sol                volume tiers, pool guard (26)
@@ -897,7 +897,7 @@ forge script script/Deploy.s.sol --rpc-url $RPC_URL --broadcast
 │   ├── ServiceManager.t.sol             service manager (8)
 │   ├── MEVAttackDefense.t.sol           sandwich/JIT/escalation (6)
 │   ├── HookBehavior.t.sol               fee ladder (5)
-│   ├── HookDataAttestation.t.sol        ECDSA attestation (5)
+│   ├── HookDataAttestation.t.sol        ECDSA attestation (7)
 │   ├── DemoSimulation.t.sol             reputation walkthrough (5)
 │   ├── CrossTransactionDetection.t.sol  storage regression guard (5)
 │   ├── MEVSimulation.t.sol              MEV simulations (4)

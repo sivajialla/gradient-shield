@@ -213,7 +213,7 @@ contract DeployLocal is Script {
         PoolKey memory key,
         address swapRouter,
         address deployer
-    ) internal view {
+    ) internal pure {
         console2.log("");
         console2.log("=== GRADIENTSHIELD LOCAL DEPLOYMENT ===");
         console2.log("POOL_MANAGER        =", address(poolManager));

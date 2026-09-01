@@ -27,8 +27,10 @@ contract ScoringOracle {
     uint16 public constant MAX_SCORE = 100;
 
     /// @notice Points of score shed per full day since {lastUpdated}.
-    /// @dev TODO: tune. Linear decay keeps stale scores from permanently
-    ///      penalising an address that has stopped its toxic behaviour.
+    /// @dev Linear decay keeps a stale score from permanently penalising an
+    ///      address that has stopped its toxic behaviour. At 5/day a rejected
+    ///      address (80) is tradeable again after two days and fully clean
+    ///      after sixteen — slow enough to deter, short enough to forgive.
     uint16 public constant DECAY_PER_DAY = 5;
 
     uint256 internal constant ONE_DAY = 1 days;

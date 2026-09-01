@@ -9,7 +9,6 @@ evm_version = "cancun"
 optimizer = true
 optimizer_runs = 800
 via_ir = false
-ffi = true                # required by HookMiner / CREATE2 address mining
 fs_permissions = [{ access = "read-write", path = "./" }]
 
 # See https://book.getfoundry.sh/reference/config/ for all options.
