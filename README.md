@@ -10,10 +10,11 @@ score exists.
 
 # Project Number : HK-UHI10-1050
 
-> **200 tests passing, 0 skipped** across 16 test suites. Hook logic, BLS task
-> manager, oracle decay, sandwich/JIT detection, impact guards, hookData
-> attestation, multi-hop ERC6909 settlement, access control, edge cases,
-> and the full escalation flow are implemented and tested.
+> **220 tests passing, 0 skipped** across 18 test suites. Hook logic, BLS quorum
+> verification with real BN254 aggregate signatures, oracle decay, sandwich/JIT
+> detection, impact guards, hookData attestation, multi-hop ERC6909 settlement,
+> access control, edge cases, and the full escalation flow are implemented and
+> tested — plus a live end-to-end demo on anvil.
 
 ---
 
@@ -27,7 +28,7 @@ penalized:
 |:-----:|:------------:|--------------|
 | **1. Sender Volume Fees** | Same block (first trade) | Tracks per-sender volume per pool per block. Past **5 ETH** the fee escalates: 1.50% (5-10 ETH), 3.00% (10-20 ETH), 5.00% (20+ ETH) — making the back-run progressively unprofitable while keeping the system **fully permissionless**. |
 | **2. Pool Impact Guard** | Same block (first trade) | Tracks cumulative volume across all senders per pool per block. When total volume exceeds **10 ETH**, subsequent swaps pay a **1.50% penalty fee**, making the back-run unprofitable. |
-| **3. Sandwich/JIT Detection** | Same block | Uses **transient storage (EIP-1153)** to detect same-block buy→victim→sell patterns and same-block add→swap→remove JIT liquidity. Emits detection events and auto-triggers AVS scoring tasks. |
+| **3. Sandwich/JIT Detection** | Same block | Uses **block-scoped on-chain state** to detect same-block buy→victim→sell patterns and same-block add→swap→remove JIT liquidity. Emits detection events and auto-triggers AVS scoring tasks. |
 | **4. Continuous Fee Curve** | Every swap | Maps the sender's **0-100 risk score** onto a fee: clean (0-39) pays 0.30%, suspicious (40-79) pays up to 1.50%, confirmed toxic (80+) is rejected outright. |
 | **5. AVS Scoring (BLS Quorum)** | Asynchronous | EigenLayer operators read on-chain detection events, compute scores independently, reach BLS consensus, and write the verified score to the oracle — affecting all future swaps. |
 
@@ -54,9 +55,14 @@ Block N+1:
      Bot enters suspicious band, pays escalated fees going forward
 ```
 
-The sandwich is **physically impossible** — the back-run reverts. No score
-history, no oracle lookup, no off-chain delay. The cap is enforced by transient
-storage at ~100 gas per read/write.
+The sandwich is made **unprofitable rather than impossible** — the back-run
+still executes (the pool stays permissionless) but pays 5x the base fee, which
+eats the extracted spread. No score history, no oracle lookup, no off-chain
+delay. The threshold is enforced by block-scoped storage at ~2.9k gas per update
+after the first swap in a pool.
+
+This is verified against a live chain, not just in tests — see
+[Running the live demo](#running-the-live-demo).
 
 ---
 
@@ -123,7 +129,7 @@ sequenceDiagram
         Hook->>TM: createScoreTask(sender, "stale")
     end
 
-    Note over Hook: Sandwich detection (transient storage)
+    Note over Hook: Sandwich detection (block-scoped state)
     alt opposite-direction swap + victim in same block
         Hook->>Hook: emit SandwichDetected
         Hook->>TM: createScoreTask(sender, "sandwich")
@@ -131,7 +137,7 @@ sequenceDiagram
 
     Hook->>Hook: _computeFee(score)
 
-    Note over Hook: Impact guards (transient storage)
+    Note over Hook: Impact guards (block-scoped state)
     alt _pendingScoreFlag set from prior block
         Hook->>TM: createScoreTask(sender, "impact")
     end
@@ -180,7 +186,7 @@ fee = BASE_FEE + (MAX_ESCALATED_FEE - BASE_FEE) × (score - 40) / (80 - 40)
 
 ## Impact guards (first-trade protection)
 
-These guards use **transient storage** and act on the very first trade — no
+These guards use **block-scoped storage** and act on the very first trade — no
 reputation history needed.
 
 ### Sender volume progressive fees
@@ -199,7 +205,7 @@ reputation history needed.
 
 - Makes the back-run leg of a sandwich progressively unprofitable
 - Independent per sender — one sender's volume doesn't affect another's
-- Resets automatically each block (transient storage)
+- Resets automatically each block (entries are stamped with the writing block)
 
 ### Pool impact guard
 
@@ -269,7 +275,7 @@ Flags an address that swaps in **opposite directions within the same block** on
 the same pool, with at least one intervening swap by a different address (the
 victim).
 
-- Uses transient storage: `_firstSwap` (direction), `_blockSwaps` (count)
+- Uses block-scoped storage: `_firstSwap` (direction), `_blockSwaps` (count)
 - Requires `count >= 2` (victim swapped between) AND opposite direction
 - Emits `SandwichDetected(poolId, swapper, blockNumber)`
 - Auto-triggers `ScoreTaskTriggered(subject, blockNumber, "sandwich")`
@@ -284,22 +290,45 @@ the same pool.
 - Emits `JITDetected(poolId, provider, blockNumber)`
 - Auto-triggers `ScoreTaskTriggered(subject, blockNumber, "jit")`
 
-### Transient storage (EIP-1153)
+### Block-scoped detection state (and why it is *not* transient storage)
 
-All per-block detection state uses **transient storage** (`TSTORE`/`TLOAD`):
+An earlier version of this hook kept all per-block detection state in
+**transient storage** (EIP-1153) for the gas savings. That was a correctness
+bug, and it is worth spelling out because the tests did not catch it:
 
-| Operation | Regular storage | Transient storage | Savings |
-|-----------|:--------------:|:-----------------:|:-------:|
-| Write (cold) | 22,100 gas | 100 gas | **99.5%** |
-| Write (warm) | 5,000 gas | 100 gas | **98%** |
-| Read (cold) | 2,100 gas | 100 gas | **95%** |
+> Transient storage is discarded at the end of every **transaction**, not every
+> **block**. A real sandwich is three separate transactions — front-run, victim,
+> back-run. Nothing written during the front-run survives to the back-run, so
+> the pattern was never detected on a live chain.
 
-Five transient namespaces prevent slot collisions:
+Foundry hid this: a test function is a single transaction, so `TSTORE` values
+persisted from one swap call to the next and every test passed. Running the same
+sandwich as three transactions against anvil produced zero detections and
+charged all three legs the base fee.
+
+State now lives in a persistent `mapping(bytes32 => uint256)` where each entry
+packs the block that wrote it into the high 64 bits. A read from a later block
+returns zero, so the state still resets every block with no sweep. Because a
+slot is reused block after block it stays non-zero, costing a dirty-slot update
+rather than a cold write.
+
+Measured `beforeSwap` gas:
+
+| Swap | Gas | Why |
+|------|:---:|-----|
+| First ever in a pool | ~104,600 | Cold slots, 20k each |
+| Every subsequent swap | ~10,500 | Dirty-slot updates, ~2.9k each |
+
+Five namespaces prevent slot collisions:
 - `GradientShield.firstSwap` — sandwich direction tracking
 - `GradientShield.blockSwaps` — victim swap counting
 - `GradientShield.liquidityAdds` — JIT detection
 - `GradientShield.poolImpact` — pool-level volume tracking
 - `GradientShield.senderImpact` — per-sender volume tracking
+
+`test/CrossTransactionDetection.t.sol` guards the fix: it reads the raw storage
+slot with `vm.load`, which cannot see transient storage, so a regression to
+`TSTORE` fails immediately.
 
 ---
 
@@ -342,10 +371,12 @@ Uses EigenLayer's BLS signature infrastructure for decentralized score consensus
 
 | Limitation | Why | Mitigation |
 |------------|-----|------------|
-| **Cross-block sandwich** | Transient storage resets each block, so a buy in block N and sell in block N+1 is not detected | AVS operators can detect cross-block patterns off-chain and score accordingly |
-| **Fresh wallet evasion** | Attacker uses a new address for each attack to avoid score accumulation | Impact guards (layers 1-2) still block the back-run on every attempt regardless of address. The cap makes each attempt cost gas with no profit. |
-| **Split-router attacks** | Splitting volume across multiple addresses to stay under sender cap | Pool impact guard (layer 2) catches aggregate volume across all senders |
+| **Identity is the router, not the trader** | In v4 the `sender` passed to `beforeSwap` is whoever called `poolManager.swap()` — a router, not the EOA. Behind a shared router every trader collapses into one identity: an honest user can inherit a bot's volume, and the router itself accumulates score. **This is the most important open issue.** | Resolve the real trader from `hookData` (the attestation plumbing already exists), or restrict the pool to routers that forward the originator. Not yet implemented. |
+| **Cross-block sandwich** | Detection state resets each block, so a buy in block N and sell in block N+1 is not detected | AVS operators can detect cross-block patterns off-chain and score accordingly |
+| **Fresh wallet evasion** | Attacker uses a new address for each attack to avoid score accumulation | Impact guards (layers 1-2) price every attempt regardless of address, so a fresh wallet still pays the escalated fee on its back-run |
+| **Split-address attacks** | Splitting volume across several addresses to stay under the sender threshold | Pool impact guard (layer 2) catches aggregate volume across all senders |
 | **Builder-level MEV** | Block builders can reorder transactions outside the hook's visibility | Out of scope for application-layer hooks; requires PBS/inclusion list solutions |
+| **BLS quorum weighting** | `BLSQuorumTaskManager` weights every registered operator equally; it does not read restaking weight | The EigenLayer-backed `GradientShieldTaskManager` uses StakeRegistry weight, but needs full EigenLayer infra to deploy |
 
 ---
 
@@ -355,10 +386,12 @@ Uses EigenLayer's BLS signature infrastructure for decentralized score consensus
 |-----------|:-----:|----------------|
 | `GradientShieldHook` | on-chain | v4 hook. Reads scores, applies fee curve, detects sandwich/JIT, enforces impact guards, auto-triggers BLS tasks, emits telemetry. |
 | `ScoringOracle` | on-chain | Per-address score store with 5-point/day linear decay. Reads open; writes AVS-gated. |
-| `GradientShieldTaskManager` | on-chain | BLS task manager. Creates scoring tasks, verifies BLS-aggregated quorum signatures, enforces response/challenge windows. |
+| `BLSQuorumTaskManager` | on-chain | **The runnable AVS.** Own operator registry + real BN254 aggregate signature verification via the pairing precompile. Deploys on bare anvil — no EigenLayer infra. |
+| `GradientShieldTaskManager` | on-chain | EigenLayer-backed variant. Same crypto, but quorum weight comes from the StakeRegistry and it needs the full middleware stack deployed. |
 | `GradientShieldServiceManager` | on-chain | AVS identity layer. Links to TaskManager, handles EigenLayer registration. |
-| AVS Operators | off-chain | Read hook events, compute scores from attack patterns, sign with BLS. |
-| Aggregator | off-chain | Collects BLS partial signatures, aggregates, submits to TaskManager. |
+| `BN254Lib` | on-chain | Vendored, 0.8.26-compatible subset of EigenLayer's BN254 library. Needed because v4-core pins `=0.8.26` while the EigenLayer library declares `^0.8.27`. |
+| `operator/avs.js` | off-chain | Operator quorum + aggregator. Reads hook events, scores the subject, signs with BLS, aggregates, submits. |
+| `operator/attack.js` | off-chain | Demo driver. Mines a genuine three-transaction sandwich into a single block. |
 
 ---
 
@@ -396,29 +429,38 @@ forge build
 ### Run the tests
 
 ```bash
-forge test -vvv
+forge test
 ```
 
-All 200 tests should pass:
+All 220 tests should pass:
 
 | Suite | Tests | What it covers |
 |-------|:-----:|----------------|
 | `HookEdgeCases.t.sol` | 36 | Edge cases across all hook logic |
 | `HookCoverage.t.sol` | 30 | Line coverage for hook paths |
-| `ImpactGuard.t.sol` | 24 | Sender cap, pool guard, sandwich blocking, scoring trigger |
+| `ImpactGuard.t.sol` | 26 | Volume tiers, pool guard, sandwich pricing, scoring trigger |
 | `AccessControl.t.sol` | 22 | Permission and access control checks |
 | `TaskManagerAccess.t.sol` | 16 | Task manager permission paths |
 | `ScoringOracle.t.sol` | 15 | Decay, bump, access control, ownership |
-| `TaskManager.t.sol` | 13 | BLS task lifecycle, response window, challenges |
+| `TaskManager.t.sol` | 13 | EigenLayer task lifecycle, response window, challenges |
+| `BLSQuorumIntegration.t.sol` | 13 | **Real BN254 BLS signatures**, quorum thresholds, full AVS loop |
 | `ServiceManager.t.sol` | 8 | Initialization, task manager linking, ownership |
 | `HookAttestorCoverage.t.sol` | 7 | Attestor-related hook paths |
 | `MEVAttackDefense.t.sol` | 6 | Sandwich/JIT detection, full escalation flow |
 | `HookBehavior.t.sol` | 5 | Fee ladder, dynamic fee override, permissions |
 | `HookDataAttestation.t.sol` | 5 | ECDSA attestation via hookData, fallback paths |
 | `DemoSimulation.t.sol` | 5 | End-to-end scoring scenarios with BLS quorum |
+| `CrossTransactionDetection.t.sol` | 5 | Detection state persists across transactions (regression guard) |
 | `MEVSimulation.t.sol` | 4 | MEV attack simulations |
 | `MultiHopSwap.t.sol` | 3 | ERC6909 multi-hop settlement |
 | `SandwichAttackSim.t.sol` | 1 | Full 6-phase sandwich simulation |
+
+The BLS suite signs with real BN254 keys and verifies through the EVM pairing
+precompile — no mocked signature checks:
+
+```bash
+make demo-bls
+```
 
 ### Run the demo scenarios
 
@@ -428,26 +470,77 @@ Watch the 5-scenario scoring demo with console output:
 forge test --match-path test/DemoSimulation.t.sol -vvv
 ```
 
-### Set up the off-chain operator (optional)
+## Running the live demo
+
+The full loop — sandwich → detection → BLS quorum → repricing — runs on a bare
+anvil node with no EigenLayer infrastructure. Four terminals:
+
+**Terminal 1 — chain**
 
 ```bash
-cd operator
-npm install
+anvil
 ```
 
-Create a `.env` file from the example:
+**Terminal 2 — deploy pool, hook, and the operator quorum**
 
 ```bash
-cp .env.example .env
+make deploy-local
 ```
 
-Fill in `RPC_URL`, `OPERATOR_PRIVATE_KEY`, `SERVICE_MANAGER_ADDRESS`,
-`SCORING_ORACLE_ADDRESS`, and `HOOK_ADDRESS` (printed by the deploy script).
+Copy the printed `TASK_MANAGER`, `SCORING_ORACLE`, `HOOK_ADDRESS`,
+`SWAP_ROUTER`, `TOKEN0`, and `TOKEN1` into `operator/.env`
+(start from `cp operator/.env.example operator/.env`).
+
+**Terminal 3 — the AVS operator quorum**
 
 ```bash
-npm run operator        # start the operator node (watches for tasks)
-npm run create-task     # create a scoring task
-npm run score           # check/score an address
+make avs
+```
+
+**Terminal 4 — run a sandwich attack**
+
+```bash
+make attack
+```
+
+The attack driver disables anvil's automining, queues the front-run, the
+victim's swap, and the back-run as **three separate transactions**, then mines
+them into one block — the same shape a builder would produce.
+
+Expected output in terminal 4:
+
+```
+  SandwichDetected:    1
+  SenderImpactCapped:  1
+  FeeEscalated:        1
+
+  Fee charged per leg:
+    buy       4.0 -> 3000 pips (0.30%)
+    buy       1.0 -> 3000 pips (0.30%)
+    sell      4.0 -> 15000 pips (1.50%)  <-- penalised
+
+  ScoreTaskTriggered:  1
+```
+
+And in terminal 3, the quorum closing the loop:
+
+```
+Task 0 — scoring 0xB7f8...4F5e
+  Current oracle score: 0
+    • 1 sandwich detection(s) → +35
+    • 1 volume-threshold breach(es) → +30
+  Score delta: 65
+  Hook action: ESCALATED FEE — 1.05%
+  3/3 operators signed score=65
+  BLS pairing verified on-chain — tx 0x7e97…
+  Oracle score is now: 65
+```
+
+Run `make attack` a second time and every leg is now priced at 1.05% instead of
+0.30% — the quorum's verdict feeding back into the hook. Check any address with:
+
+```bash
+make score ADDR=0x...
 ```
 
 ### Makefile shortcuts
@@ -455,12 +548,18 @@ npm run score           # check/score an address
 ```bash
 make help               # list all available targets
 make install            # install Solidity + Node.js deps
-make build              # forge build
-make test               # forge test -vvv
-make demo               # run the 5-scenario demo
-make deploy-sepolia     # deploy to Sepolia (needs env vars)
-make operator           # start the off-chain operator node
+make test               # run all 220 tests
+make demo-bls           # BLS quorum integration suite (real signatures)
+make demo-fee           # trace showing PoolManager charging the escalated fee
+make demo               # 5-scenario reputation walkthrough
+make deploy-local       # deploy the full stack to anvil
+make avs                # run the operator quorum + aggregator
+make attack             # execute a same-block sandwich
+make keygen             # regenerate demo operator BLS keys
 ```
+
+> The BLS keys in `operator/keys.json` are **demo keys** — deterministic, public,
+> and derived from seeds committed in `blsKeygen.js`. Never reuse them.
 
 ---
 

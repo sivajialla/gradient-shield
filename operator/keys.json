@@ -1,0 +1,62 @@
+{
+  "note": "DEMO KEYS — deterministic and public. Never reuse for anything real.",
+  "operators": [
+    {
+      "index": 0,
+      "name": "operator0",
+      "privateKey": "0x1a2b3c4d5e6f70819293a4b5c6d7e8f90102030405060708090a0b0c0d0e0f10",
+      "pkG1": {
+        "X": "0x08043f0c7e98095f03dbbe4c10e9158fea53d986e38c33d46d6631ebc9fc0e66",
+        "Y": "0x1606a306c3e030c691220b755a897b43b9aeb112b8b489ac95692100cfee2b95"
+      },
+      "pkG2": {
+        "X": [
+          "0x01e49cbdbaaaee880dbd3e8ab63494e8f046b4e99e61ee205997f1c987664d7e",
+          "0x17393d89e8cfc4c0cf280f2545b7a15b17165dad639ef1b688b909785e42789a"
+        ],
+        "Y": [
+          "0x081af7b2db878416b7609e59a875007e523c34da0fc424ae61340f39a04a835d",
+          "0x074e7e8de29426bd40726259c7747ea765c3d7bf64653f116e5fa8dfea40db90"
+        ]
+      }
+    },
+    {
+      "index": 1,
+      "name": "operator1",
+      "privateKey": "0x2b3c4d5e6f708192a3b4c5d6e7f8091a020304050607080910111213141516f7",
+      "pkG1": {
+        "X": "0x19d45a236234f9d78ff32ce4b33218b53afdf1d8b6a98169517671515cd4b396",
+        "Y": "0x0acac82243a4e25b4f4366d4d7bf1178a144eb7710f2746826d69395d809da5c"
+      },
+      "pkG2": {
+        "X": [
+          "0x0f4f8d8b190feeb3307bbd57673fdccdac8bc29695cb84281b0f796c8f043962",
+          "0x0d4b4c3e5cd4efa0e71a1889f3afc0a613829e568be4c776e0ab41d2a6d16b46"
+        ],
+        "Y": [
+          "0x306259fa0021467aec027b84015d85eebabbab9fea85af4c91a03efe56ce6259",
+          "0x105ec6bf53ffd0f4fa3903a174165ad8fb5e8d8e36600b9b41eeee1dfc3212a9"
+        ]
+      }
+    },
+    {
+      "index": 2,
+      "name": "operator2",
+      "privateKey": "0x0be90ffc8f4ff279fc7591317687c1cddad01cbd8d4e987ecd301d802516f7e7",
+      "pkG1": {
+        "X": "0x03f36a41cb7f3b8c9d6acda983807c2ac61379281b0d4e01ee14664319b961d3",
+        "Y": "0x2dce6b4b366829e8f976fda27a914f7916ba26e2ba338560e0c3ab4013e3e496"
+      },
+      "pkG2": {
+        "X": [
+          "0x169f7e02748359bb57607fb077a074a1453573f8ef3dcfb9de7c528a10663504",
+          "0x293b9e1c0c037f1a1e820879abf06cf4417d089cac74d41f6a47b1c115b436b5"
+        ],
+        "Y": [
+          "0x2485b9c99efd2c721b7f8db4157cb90e6d3726535a438f67695034fd74bc5398",
+          "0x22c8ab7097c0bc9ad626ea72a5bc1027b4dd496b62b463ffd7e3e3e62b84329f"
+        ]
+      }
+    }
+  ]
+}

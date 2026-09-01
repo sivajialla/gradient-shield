@@ -19,13 +19,15 @@ import {IScoreTaskCreator} from "./IScoreTaskCreator.sol";
 
 /// @title GradientShieldHook
 /// @notice Uniswap v4 hook that prices swaps by the swapper's MEV risk score,
-///         detects sandwich/JIT patterns on-chain using transient storage (EIP-1153),
-///         and auto-triggers BLS quorum scoring tasks when patterns are detected.
+///         detects sandwich/JIT patterns on-chain, and auto-triggers BLS quorum
+///         scoring tasks when patterns are detected.
 ///
-/// Gas optimization: all per-block detection state (sandwich tracking, swap
-/// counters, JIT liquidity flags) uses TSTORE/TLOAD (100 gas each) instead of
-/// SSTORE/SLOAD (5k-20k gas). This saves ~20k gas per swap on detection logic.
-/// Transient storage auto-clears at transaction end — no manual reset needed.
+/// Detection state (sandwich direction, swap counters, JIT liquidity flags,
+/// cumulative volumes) is block-scoped: each entry is stamped with the block
+/// that wrote it, so it reads back as empty in the next block and needs no
+/// explicit reset. See {_bload} for why this uses persistent storage rather
+/// than transient storage (EIP-1153) — in short, a sandwich spans three
+/// separate transactions, and transient state does not survive between them.
 ///
 /// Continuous fee curve (driven by {ScoringOracle} score):
 ///   score < 40   -> BASE_FEE (3000 pips = 0.30%)
@@ -85,16 +87,21 @@ contract GradientShieldHook is BaseHook, IUnlockCallback {
     uint24 public constant IMPACT_FEE_TIER2 = 30000;
     uint24 public constant IMPACT_FEE_TIER3 = 50000;
 
-    // Transient storage namespace seeds (prevent slot collisions).
+    // Per-block detection-state namespace seeds (prevent slot collisions).
     bytes32 private constant _FIRST_SWAP_NS = keccak256("GradientShield.firstSwap");
     bytes32 private constant _BLOCK_SWAPS_NS = keccak256("GradientShield.blockSwaps");
     bytes32 private constant _LIQUIDITY_NS = keccak256("GradientShield.liquidityAdds");
     bytes32 private constant _POOL_IMPACT_NS = keccak256("GradientShield.poolImpact");
     bytes32 private constant _SENDER_IMPACT_NS = keccak256("GradientShield.senderImpact");
 
-    // Transient storage sentinel values for first-swap direction.
+    // Sentinel values for first-swap direction.
     uint256 private constant _SWAP_ZERO_FOR_ONE = 1;
     uint256 private constant _SWAP_ONE_FOR_ZERO = 2;
+
+    // Block-scoped state packs the writing block into the high 64 bits so a
+    // stale entry from an earlier block reads back as empty. See {_bload}.
+    uint256 private constant _BLOCK_SHIFT = 192;
+    uint256 private constant _PAYLOAD_MASK = (1 << 192) - 1;
 
     // ---------------------------------------------------------------------
     // Persistent state (cross-transaction)
@@ -106,6 +113,12 @@ contract GradientShieldHook is BaseHook, IUnlockCallback {
 
     mapping(address => uint256) internal _lastTaskBlock;
     mapping(address => bool) internal _pendingScoreFlag;
+
+    /// @dev Per-block detection state (sandwich direction, swap counters, JIT
+    ///      flags, cumulative volumes). Entries are stamped with the block that
+    ///      wrote them, so a read from a later block sees zero without any
+    ///      explicit reset.
+    mapping(bytes32 => uint256) internal _blockState;
 
     // ---------------------------------------------------------------------
     // Events
@@ -300,9 +313,9 @@ contract GradientShieldHook is BaseHook, IUnlockCallback {
 
     function _detectSandwich(PoolId poolId, address sender, bool zeroForOne) internal {
         bytes32 firstSlot = _firstSwapSlot(poolId, sender);
-        uint256 recorded = _tload(firstSlot);
+        uint256 recorded = _bload(firstSlot);
         bytes32 counterSlot = _blockSwapsSlot(poolId);
-        uint256 swapCount = _tload(counterSlot);
+        uint256 swapCount = _bload(counterSlot);
 
         if (recorded != 0) {
             if ((recorded == _SWAP_ZERO_FOR_ONE) != zeroForOne && swapCount >= 2) {
@@ -310,10 +323,10 @@ contract GradientShieldHook is BaseHook, IUnlockCallback {
                 _triggerScoreTask(sender, "sandwich");
             }
         } else {
-            _tstore(firstSlot, zeroForOne ? _SWAP_ZERO_FOR_ONE : _SWAP_ONE_FOR_ZERO);
+            _bstore(firstSlot, zeroForOne ? _SWAP_ZERO_FOR_ONE : _SWAP_ONE_FOR_ZERO);
         }
 
-        _tstore(counterSlot, swapCount + 1);
+        _bstore(counterSlot, swapCount + 1);
     }
 
     // ---------------------------------------------------------------------
@@ -333,8 +346,8 @@ contract GradientShieldHook is BaseHook, IUnlockCallback {
         // — no reverts, any amount is tradeable. Sandwich back-runs become
         // unprofitable because the fee eats the extracted value.
         bytes32 senderSlot = _senderImpactSlot(poolId, sender);
-        uint256 senderCumulative = _tload(senderSlot) + swapSize;
-        _tstore(senderSlot, senderCumulative);
+        uint256 senderCumulative = _bload(senderSlot) + swapSize;
+        _bstore(senderSlot, senderCumulative);
 
         uint24 senderFee = BASE_FEE;
         if (senderCumulative > SENDER_VOLUME_THRESHOLD * 4) {
@@ -354,8 +367,8 @@ contract GradientShieldHook is BaseHook, IUnlockCallback {
         // Pool-level guard: if cumulative volume across all senders exceeds
         // the threshold, escalate the fee.
         bytes32 poolSlot = _poolImpactSlot(poolId);
-        uint256 poolCumulative = _tload(poolSlot) + swapSize;
-        _tstore(poolSlot, poolCumulative);
+        uint256 poolCumulative = _bload(poolSlot) + swapSize;
+        _bstore(poolSlot, poolCumulative);
 
         if (poolCumulative > POOL_IMPACT_THRESHOLD) {
             uint24 poolFee = IMPACT_FEE_TIER1;
@@ -418,7 +431,7 @@ contract GradientShieldHook is BaseHook, IUnlockCallback {
         bytes calldata
     ) internal override returns (bytes4) {
         PoolId poolId = key.toId();
-        _tstore(_liquiditySlot(poolId, sender), 1);
+        _bstore(_liquiditySlot(poolId, sender), 1);
         return BaseHook.beforeAddLiquidity.selector;
     }
 
@@ -429,7 +442,7 @@ contract GradientShieldHook is BaseHook, IUnlockCallback {
         bytes calldata
     ) internal override returns (bytes4) {
         PoolId poolId = key.toId();
-        if (_tload(_liquiditySlot(poolId, sender)) == 1) {
+        if (_bload(_liquiditySlot(poolId, sender)) == 1) {
             emit JITDetected(poolId, sender, block.number);
             _triggerScoreTask(sender, "jit");
         }
@@ -442,7 +455,13 @@ contract GradientShieldHook is BaseHook, IUnlockCallback {
 
     function _triggerScoreTask(address subject, string memory detectionType) internal {
         if (address(taskManager) == address(0)) return;
-        if (_lastTaskBlock[subject] + TASK_COOLDOWN_BLOCKS > block.number) return;
+
+        // Rate-limit repeat tasks for the same subject. The zero check matters:
+        // a never-scored address has _lastTaskBlock == 0, and without it the
+        // cooldown would suppress every first offence until the chain passed
+        // block TASK_COOLDOWN_BLOCKS.
+        uint256 last = _lastTaskBlock[subject];
+        if (last != 0 && last + TASK_COOLDOWN_BLOCKS > block.number) return;
 
         uint256 fromBlock = block.number > DETECTION_LOOKBACK ? block.number - DETECTION_LOOKBACK : 0;
 
@@ -473,34 +492,50 @@ contract GradientShieldHook is BaseHook, IUnlockCallback {
     }
 
     // ---------------------------------------------------------------------
-    // Transient storage helpers (EIP-1153)
+    // Block-scoped state helpers
     // ---------------------------------------------------------------------
+    //
+    // These deliberately use persistent storage rather than transient storage
+    // (EIP-1153). TSTORE/TLOAD is ~20k gas cheaper, but transient storage is
+    // discarded at the end of each *transaction*, not each block — and a real
+    // sandwich is three separate transactions (front-run, victim, back-run).
+    // Transient state therefore never survives from the front-run to the
+    // back-run, and no pattern would ever be detected on a live chain.
+    //
+    // Each entry stamps the block that wrote it into the high 64 bits, so a
+    // read from a later block returns zero and the state resets itself without
+    // an explicit sweep. Because a slot is reused block after block it stays
+    // non-zero, costing ~2.9k gas per update instead of a cold 20k write.
 
-    function _tstore(bytes32 slot, uint256 value) internal {
-        assembly { tstore(slot, value) }
+    /// @dev Reads the payload only if it was written in the current block.
+    function _bload(bytes32 slot) internal view returns (uint256) {
+        uint256 packed = _blockState[slot];
+        if (packed >> _BLOCK_SHIFT != block.number) return 0;
+        return packed & _PAYLOAD_MASK;
     }
 
-    function _tload(bytes32 slot) internal view returns (uint256 value) {
-        assembly { value := tload(slot) }
+    /// @dev Writes the payload stamped with the current block.
+    function _bstore(bytes32 slot, uint256 value) internal {
+        _blockState[slot] = (block.number << _BLOCK_SHIFT) | (value & _PAYLOAD_MASK);
     }
 
-    function _firstSwapSlot(PoolId poolId, address sender) internal view returns (bytes32) {
-        return keccak256(abi.encode(_FIRST_SWAP_NS, poolId, sender, block.number));
+    function _firstSwapSlot(PoolId poolId, address sender) internal pure returns (bytes32) {
+        return keccak256(abi.encode(_FIRST_SWAP_NS, poolId, sender));
     }
 
-    function _blockSwapsSlot(PoolId poolId) internal view returns (bytes32) {
-        return keccak256(abi.encode(_BLOCK_SWAPS_NS, poolId, block.number));
+    function _blockSwapsSlot(PoolId poolId) internal pure returns (bytes32) {
+        return keccak256(abi.encode(_BLOCK_SWAPS_NS, poolId));
     }
 
-    function _liquiditySlot(PoolId poolId, address sender) internal view returns (bytes32) {
-        return keccak256(abi.encode(_LIQUIDITY_NS, poolId, sender, block.number));
+    function _liquiditySlot(PoolId poolId, address sender) internal pure returns (bytes32) {
+        return keccak256(abi.encode(_LIQUIDITY_NS, poolId, sender));
     }
 
-    function _poolImpactSlot(PoolId poolId) internal view returns (bytes32) {
-        return keccak256(abi.encode(_POOL_IMPACT_NS, poolId, block.number));
+    function _poolImpactSlot(PoolId poolId) internal pure returns (bytes32) {
+        return keccak256(abi.encode(_POOL_IMPACT_NS, poolId));
     }
 
-    function _senderImpactSlot(PoolId poolId, address sender) internal view returns (bytes32) {
-        return keccak256(abi.encode(_SENDER_IMPACT_NS, poolId, sender, block.number));
+    function _senderImpactSlot(PoolId poolId, address sender) internal pure returns (bytes32) {
+        return keccak256(abi.encode(_SENDER_IMPACT_NS, poolId, sender));
     }
 }

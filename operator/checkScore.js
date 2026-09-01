@@ -20,14 +20,17 @@ if (!address || !ethers.isAddress(address)) {
 }
 
 const score = Number(await oracle.getScore(address));
+const raw = await oracle.rawRecord(address);
 
 console.log(`Address: ${address}`);
-console.log(`Score:   ${score}`);
+console.log(`Score:   ${score}${Number(raw.score) !== score ? ` (raw ${raw.score}, decayed)` : ""}`);
 
 if (score >= 80) {
-  console.log(`Band:    REJECTED (swap reverts)`);
+  console.log("Band:    REJECTED — swap reverts with BotRejected");
 } else if (score >= 40) {
-  console.log(`Band:    SUSPICIOUS (3x fee - 9000 pips)`);
+  // Continuous curve: 3000 → 15000 pips across scores 40 → 80.
+  const fee = 3000 + ((15000 - 3000) * (score - 40)) / 40;
+  console.log(`Band:    SUSPICIOUS — ${Math.round(fee)} pips (${(fee / 10000).toFixed(2)}%)`);
 } else {
-  console.log(`Band:    CLEAN (base fee - 3000 pips)`);
+  console.log("Band:    CLEAN — base fee 3000 pips (0.30%)");
 }
