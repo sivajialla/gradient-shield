@@ -77,12 +77,12 @@ contract GradientShieldHook is BaseHook, IUnlockCallback {
     // making the back-run leg of a sandwich unprofitable.
     uint256 public constant POOL_IMPACT_THRESHOLD = 10 ether;
 
-    // Per-sender volume threshold: when a single sender's cumulative volume
+    // Per-trader volume threshold: when a single trader's cumulative volume
     // in one pool in one block exceeds this, a progressive penalty fee applies.
     // No revert — the system is fully permissionless.
     uint256 public constant SENDER_VOLUME_THRESHOLD = 5 ether;
 
-    // Progressive fee tiers (pips). As sender volume grows within a block,
+    // Progressive fee tiers (pips). As a trader's volume grows within a block,
     // the fee escalates, making sandwich back-runs increasingly unprofitable.
     //   0 – SENDER_VOLUME_THRESHOLD:   base fee (3000 pips = 0.30%)
     //   1x – 2x threshold:             15000 pips (1.50%)
@@ -437,16 +437,16 @@ contract GradientShieldHook is BaseHook, IUnlockCallback {
         return tx.origin;
     }
 
-    function _detectSandwich(PoolId poolId, address sender, bool zeroForOne) internal {
-        bytes32 firstSlot = _firstSwapSlot(poolId, sender);
+    function _detectSandwich(PoolId poolId, address trader, bool zeroForOne) internal {
+        bytes32 firstSlot = _firstSwapSlot(poolId, trader);
         uint256 recorded = _bload(firstSlot);
         bytes32 counterSlot = _blockSwapsSlot(poolId);
         uint256 swapCount = _bload(counterSlot);
 
         if (recorded != 0) {
             if ((recorded == _SWAP_ZERO_FOR_ONE) != zeroForOne && swapCount >= 2) {
-                emit SandwichDetected(poolId, sender, block.number);
-                _triggerScoreTask(sender, "sandwich");
+                emit SandwichDetected(poolId, trader, block.number);
+                _triggerScoreTask(trader, "sandwich");
             }
         } else {
             _bstore(firstSlot, zeroForOne ? _SWAP_ZERO_FOR_ONE : _SWAP_ONE_FOR_ZERO);
@@ -459,19 +459,19 @@ contract GradientShieldHook is BaseHook, IUnlockCallback {
     // Price impact guards
     // ---------------------------------------------------------------------
 
-    function _applyImpactGuards(PoolId poolId, address sender, uint256 swapSize) internal returns (uint24) {
+    function _applyImpactGuards(PoolId poolId, address trader, uint256 swapSize) internal returns (uint24) {
         uint24 fee = BASE_FEE;
 
-        if (_pendingScoreFlag[sender]) {
-            _pendingScoreFlag[sender] = false;
-            _triggerScoreTask(sender, "impact_prior");
+        if (_pendingScoreFlag[trader]) {
+            _pendingScoreFlag[trader] = false;
+            _triggerScoreTask(trader, "impact_prior");
         }
 
-        // Per-sender progressive fee: as a sender's cumulative volume in
+        // Per-trader progressive fee: as a trader's cumulative volume in
         // one pool in one block grows, the fee escalates. Fully permissionless
         // — no reverts, any amount is tradeable. Sandwich back-runs become
         // unprofitable because the fee eats the extracted value.
-        bytes32 senderSlot = _senderImpactSlot(poolId, sender);
+        bytes32 senderSlot = _senderImpactSlot(poolId, trader);
         uint256 senderCumulative = _bload(senderSlot) + swapSize;
         _bstore(senderSlot, senderCumulative);
 
@@ -485,8 +485,8 @@ contract GradientShieldHook is BaseHook, IUnlockCallback {
         }
 
         if (senderFee > BASE_FEE) {
-            emit SenderImpactCapped(poolId, sender, senderCumulative, senderFee);
-            _pendingScoreFlag[sender] = true;
+            emit SenderImpactCapped(poolId, trader, senderCumulative, senderFee);
+            _pendingScoreFlag[trader] = true;
             fee = senderFee;
         }
 
@@ -499,7 +499,7 @@ contract GradientShieldHook is BaseHook, IUnlockCallback {
         if (poolCumulative > POOL_IMPACT_THRESHOLD) {
             uint24 poolFee = IMPACT_FEE_TIER1;
             if (poolFee > fee) fee = poolFee;
-            emit PoolImpactGuard(poolId, sender, poolCumulative, fee);
+            emit PoolImpactGuard(poolId, trader, poolCumulative, fee);
         }
 
         return fee;
@@ -521,34 +521,34 @@ contract GradientShieldHook is BaseHook, IUnlockCallback {
     // Score resolution (hookData attestation or on-chain oracle fallback)
     // ---------------------------------------------------------------------
 
-    function _resolveScore(address sender, bytes calldata hookData) internal view returns (uint16) {
+    function _resolveScore(address trader, bytes calldata hookData) internal view returns (uint16) {
         if (hookData.length == 0 || attestor == address(0)) {
-            return oracle.getScore(sender);
+            return oracle.getScore(trader);
         }
 
-        if (hookData.length != 160) return oracle.getScore(sender);
+        if (hookData.length != 160) return oracle.getScore(trader);
 
         (uint16 score, uint64 expiry, uint8 v, bytes32 r, bytes32 s) =
             abi.decode(hookData, (uint16, uint64, uint8, bytes32, bytes32));
 
-        if (block.timestamp > expiry) return oracle.getScore(sender);
+        if (block.timestamp > expiry) return oracle.getScore(trader);
 
         bytes32 digest = keccak256(
             abi.encodePacked(
                 "\x19Ethereum Signed Message:\n32",
-                keccak256(abi.encodePacked(sender, score, expiry, block.chainid, address(this)))
+                keccak256(abi.encodePacked(trader, score, expiry, block.chainid, address(this)))
             )
         );
 
         address recovered = ecrecover(digest, v, r, s);
-        if (recovered != attestor) return oracle.getScore(sender);
+        if (recovered != attestor) return oracle.getScore(trader);
 
         // An attestation may only RAISE the score, never lower it below what the
         // quorum has already written. Letting it override downward would turn a
         // single attestor key into a bypass for the whole reputation system —
         // one signature could zero out a rejected bot and walk it past the
         // {REJECT_THRESHOLD} gate.
-        uint16 onchain = oracle.getScore(sender);
+        uint16 onchain = oracle.getScore(trader);
         return score > onchain ? score : onchain;
     }
 
