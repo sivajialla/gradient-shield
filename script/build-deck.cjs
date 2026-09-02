@@ -109,8 +109,12 @@ function badge(slide, x, y, label, color) {
     });
   });
 
+  s.addText("Sivaji Alla", {
+    x: M, y: 6.45, w: 6, h: 0.32,
+    fontSize: 15, bold: true, color: TEXT, fontFace: H, isTextBox: true, margin: 0,
+  });
   s.addText("Project HK-UHI10-1050", {
-    x: M, y: 6.55, w: 6, h: 0.3,
+    x: M, y: 6.78, w: 6, h: 0.3,
     fontSize: 11, color: DIM, fontFace: B, isTextBox: true, margin: 0,
   });
 
