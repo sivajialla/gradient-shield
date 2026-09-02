@@ -189,7 +189,74 @@ function badge(slide, x, y, label, color) {
 }
 
 // =====================================================================
-// 3. Five defense layers
+// 3. Original idea
+// =====================================================================
+{
+  const s = pres.addSlide();
+  bg(s);
+  kicker(s, "ORIGINAL IDEA", 0.55);
+  title(s, "Three things no other MEV hook does together", 0.95);
+
+  const claims = [
+    [
+      "Protection before reputation exists",
+      "Score the address, then act — so the first attack from a fresh wallet always lands.",
+      "The volume guard prices the very first sandwich. No history, no oracle, no waiting.",
+    ],
+    [
+      "Penalise without excluding",
+      "Revert oversized trades, or gate the pool behind an allowlist.",
+      "Fees escalate with the trader's own volume. Any address, any size, any time — priced.",
+    ],
+    [
+      "Identity at the trader, not the router",
+      "Key on the address v4 hands the hook, which is a router shared by thousands.",
+      "Resolve the real trader, so one bot cannot tax everyone behind its router.",
+    ],
+  ];
+
+  claims.forEach(([head, usual, ours], i) => {
+    const y = 1.95 + i * 1.62;
+    card(s, M, y, W - M * 2, 1.42);
+    badge(s, M + 0.28, y + 0.2, String(i + 1), MINT);
+
+    s.addText(head, {
+      x: M + 0.85, y: y + 0.18, w: 10.8, h: 0.32,
+      fontSize: 17, bold: true, color: TEXT, fontFace: H, isTextBox: true, margin: 0,
+    });
+
+    s.addText("Typical hook", {
+      x: M + 0.85, y: y + 0.58, w: 1.5, h: 0.26,
+      fontSize: 11, color: DIM, fontFace: B, isTextBox: true, margin: 0,
+    });
+    s.addText(usual, {
+      x: M + 2.4, y: y + 0.56, w: 4.0, h: 0.7,
+      fontSize: 12, color: MUTED, fontFace: B, lineSpacing: 15, isTextBox: true, margin: 0,
+    });
+
+    s.addText("GradientShield", {
+      x: M + 6.7, y: y + 0.58, w: 1.7, h: 0.26,
+      fontSize: 11, bold: true, color: MINT, fontFace: B, isTextBox: true, margin: 0,
+    });
+    s.addText(ours, {
+      x: M + 8.45, y: y + 0.56, w: 3.2, h: 0.7,
+      fontSize: 12, color: TEXT, fontFace: B, lineSpacing: 15, isTextBox: true, margin: 0,
+    });
+  });
+
+  s.addNotes(
+    "If you take one slide away, take this one. Three things that are each " +
+    "individually unusual and together are the idea. One: protection that works " +
+    "before any reputation exists, which is what closes the cold-start hole every " +
+    "reputation system has. Two: we penalise without ever excluding — no trade is " +
+    "refused for its size, the fee just climbs. Three: identity resolved at the " +
+    "trader rather than the router, which is the part most v4 hooks get wrong " +
+    "without noticing."
+  );
+}
+
+// =====================================================================
+// 4. Five defense layers
 // =====================================================================
 {
   const s = pres.addSlide();
@@ -237,7 +304,7 @@ function badge(slide, x, y, label, color) {
 }
 
 // =====================================================================
-// 4. Permissionless by design
+// 5. Permissionless by design
 // =====================================================================
 {
   const s = pres.addSlide();
@@ -315,7 +382,7 @@ function badge(slide, x, y, label, color) {
 }
 
 // =====================================================================
-// 5. Trader identity
+// 6. Trader identity
 // =====================================================================
 {
   const s = pres.addSlide();
@@ -396,7 +463,7 @@ function badge(slide, x, y, label, color) {
 }
 
 // =====================================================================
-// 6. Measured effect (the money slide)
+// 7. Measured effect (the money slide)
 // =====================================================================
 {
   const s = pres.addSlide();
@@ -501,7 +568,7 @@ function badge(slide, x, y, label, color) {
 }
 
 // =====================================================================
-// 7. Honest limits
+// 8. Honest limits
 // =====================================================================
 {
   const s = pres.addSlide();
@@ -561,7 +628,7 @@ function badge(slide, x, y, label, color) {
 }
 
 // =====================================================================
-// 8. The AVS
+// 9. The AVS
 // =====================================================================
 {
   const s = pres.addSlide();
@@ -650,186 +717,196 @@ function badge(slide, x, y, label, color) {
 }
 
 // =====================================================================
-// 9. Proof / demo
+// 10. Functionality / verification
 // =====================================================================
 {
   const s = pres.addSlide();
   bg(s);
-  kicker(s, "SEE IT RUN", 0.55);
-  title(s, "The whole loop, on a local chain", 0.95);
+  kicker(s, "FUNCTIONALITY", 0.55);
+  title(s, "247 tests, and a loop that closes on a real chain", 0.95);
 
-  const cmds = [
-    ["anvil", "a local chain"],
-    ["make deploy-local", "pool, hook, operator quorum"],
-    ["make avs", "operators + aggregator"],
-    ["make attack", "a real three-transaction sandwich"],
+  // What the tests actually prove — not just a count.
+  card(s, M, 1.9, 6.2, 3.6);
+  s.addText("What the suite proves", {
+    x: M + 0.3, y: 2.1, w: 5.5, h: 0.3,
+    fontSize: 15, bold: true, color: TEXT, fontFace: H, isTextBox: true, margin: 0,
+  });
+
+  const suites = [
+    ["Trader vs router identity", "21"],
+    ["BLS quorum, real signatures", "13"],
+    ["Volume tiers + pool guard", "26"],
+    ["Storage survives across txs", "5"],
+    ["A/B against a plain pool", "4"],
+    ["Edge cases, access, coverage", "178"],
   ];
-  cmds.forEach(([cmd, note], i) => {
-    const y = 1.95 + i * 0.62;
-    card(s, M, y, 6.2, 0.52);
-    s.addText(cmd, {
-      x: M + 0.28, y: y + 0.08, w: 2.9, h: 0.36,
-      fontSize: 13, color: MINT, fontFace: MONO, valign: "middle", isTextBox: true, margin: 0,
+  suites.forEach(([k, v], i) => {
+    const y = 2.5 + i * 0.44;
+    s.addText(k, {
+      x: M + 0.3, y, w: 4.5, h: 0.36,
+      fontSize: 12, color: MUTED, fontFace: B, valign: "middle", isTextBox: true, margin: 0,
     });
-    s.addText(note, {
-      x: M + 3.2, y: y + 0.08, w: 2.8, h: 0.36,
-      fontSize: 12, color: DIM, fontFace: B, valign: "middle", isTextBox: true, margin: 0,
+    s.addText(v, {
+      x: M + 4.9, y, w: 0.9, h: 0.36,
+      fontSize: 13, bold: true, color: AMBER, fontFace: MONO,
+      align: "right", valign: "middle", isTextBox: true, margin: 0,
     });
   });
 
-  card(s, M + 6.6, 1.95, 5.0, 2.45, CARD2);
-  s.addText("What comes out", {
-    x: M + 6.95, y: 2.15, w: 4.3, h: 0.3,
-    fontSize: 14, bold: true, color: TEXT, fontFace: H, isTextBox: true, margin: 0,
+  s.addText("forge test  —  no setup, ~1 second", {
+    x: M + 0.3, y: 5.12, w: 5.5, h: 0.3,
+    fontSize: 12, color: MINT, fontFace: MONO, isTextBox: true, margin: 0,
+  });
+
+  // The live run, as evidence rather than a performance.
+  card(s, M + 6.6, 1.9, 5.0, 3.6, CARD2);
+  s.addText("And it runs end to end", {
+    x: M + 6.9, y: 2.1, w: 4.4, h: 0.3,
+    fontSize: 15, bold: true, color: TEXT, fontFace: H, isTextBox: true, margin: 0,
+  });
+  s.addText("Sandwich as 3 separate txs, one block:", {
+    x: M + 6.9, y: 2.45, w: 4.4, h: 0.3,
+    fontSize: 11, color: MUTED, fontFace: B, isTextBox: true, margin: 0,
   });
   s.addText(
     "bot     buy   4.0 ->  3000 pips\n" +
     "victim  buy   1.0 ->  3000 pips\n" +
     "bot     sell  4.0 -> 15000 pips\n\n" +
     "Flagged: bot\n" +
-    "Router score: 0",
+    "Router score: 0\n" +
+    "3/3 operators signed\n" +
+    "BLS pairing verified on-chain",
     {
-      x: M + 6.95, y: 2.5, w: 4.3, h: 1.7,
-      fontSize: 11, color: MUTED, fontFace: MONO, lineSpacing: 15, isTextBox: true, margin: 0,
+      x: M + 6.9, y: 2.8, w: 4.4, h: 2.1,
+      fontSize: 11, color: MINT, fontFace: MONO, lineSpacing: 15, isTextBox: true, margin: 0,
     }
   );
-
-  s.addText(
-    "Bot and victim are separate EOAs through the same router — the exact case that " +
-    "used to defeat the hook. Run it twice and the bot reprices to 1.05% while the " +
-    "victim still pays 0.30%.",
-    {
-      x: M, y: 4.6, w: W - M * 2, h: 0.65,
-      fontSize: 13, color: MUTED, fontFace: B, lineSpacing: 19, isTextBox: true, margin: 0,
-    }
-  );
-
-  const proof = [
-    ["247", "tests, 20 suites"],
-    ["3 txs", "one block, real sandwich"],
-    ["3/3", "operators signed"],
-    ["10.5k", "gas, steady state"],
-  ];
-  proof.forEach(([big, small], i) => {
-    const x = M + i * 3.03;
-    card(s, x, 5.4, 2.8, 1.05);
-    s.addText(big, {
-      x: x + 0.25, y: 5.55, w: 2.3, h: 0.42,
-      fontSize: 22, bold: true, color: AMBER, fontFace: H, isTextBox: true, margin: 0,
-    });
-    s.addText(small, {
-      x: x + 0.25, y: 5.98, w: 2.3, h: 0.3,
-      fontSize: 11, color: DIM, fontFace: B, isTextBox: true, margin: 0,
-    });
+  s.addText("Bot and victim are separate EOAs on one router.", {
+    x: M + 6.9, y: 5.0, w: 4.4, h: 0.42,
+    fontSize: 11, color: DIM, fontFace: B, lineSpacing: 14, isTextBox: true, margin: 0,
   });
 
+  s.addText(
+    "Judges can reproduce every number here: clone, forge test, then four commands for the live loop.",
+    {
+      x: M, y: 5.75, w: W - M * 2, h: 0.35,
+      fontSize: 13, italic: true, color: MINT, fontFace: B, isTextBox: true, margin: 0,
+    }
+  );
+
   s.addNotes(
-    "Four terminals and the whole loop closes. The demo driver turns anvil's automining " +
-    "off, queues the three legs, and mines them into one block — which is what a builder " +
-    "would actually produce. The bot and victim are separate EOAs sharing one router: " +
-    "exactly the case that used to defeat the hook. Note the last line — the router's " +
-    "own score stays zero. Run make attack a second time and the bot is repriced to " +
-    "1.05% while the victim still pays base."
+    "The submission includes test cases rather than a frontend, so this is the " +
+    "evidence slide. The left column is what the suite actually proves, broken out " +
+    "by claim rather than a bare count — identity resolution, real BLS signatures, " +
+    "the volume tiers, and the regression guard that catches detection state not " +
+    "surviving across transactions. The right is a real run: three separate " +
+    "transactions mined into one block, bot penalised, victim untouched, router " +
+    "score zero, quorum signed. Every number on this deck is reproducible from a " +
+    "clean clone."
   );
 }
 
-
 // =====================================================================
-// 10. Submission
+// 11. Submission
 // =====================================================================
 {
   const s = pres.addSlide();
   bg(s);
 
   s.addText("GradientShield", {
-    x: M, y: 0.75, w: 9.5, h: 0.85,
-    fontSize: 42, bold: true, color: TEXT, fontFace: H, isTextBox: true, margin: 0,
+    x: M, y: 0.6, w: 9.5, h: 0.8,
+    fontSize: 40, bold: true, color: TEXT, fontFace: H, isTextBox: true, margin: 0,
   });
-  s.addText("Project HK-UHI10-1050", {
-    x: M, y: 1.6, w: 6, h: 0.35,
+  s.addText("Sivaji Alla  ·  Project HK-UHI10-1050", {
+    x: M, y: 1.42, w: 8, h: 0.35,
     fontSize: 14, color: MINT, fontFace: B, isTextBox: true, margin: 0,
   });
 
-  // Repository — the thing a judge acts on.
-  card(s, M, 2.2, W - M * 2, 1.25, CARD2);
-  s.addText("Repository", {
-    x: M + 0.35, y: 2.4, w: 4, h: 0.3,
-    fontSize: 13, color: MUTED, fontFace: B, isTextBox: true, margin: 0,
-  });
+  // Repository — the thing a judge acts on first.
+  card(s, M, 2.0, W - M * 2, 1.0, CARD2);
   s.addText("github.com/sivajialla/gradient-shield", {
-    x: M + 0.35, y: 2.7, w: 8.5, h: 0.45,
-    fontSize: 21, bold: true, color: MINT, fontFace: MONO, isTextBox: true, margin: 0,
+    x: M + 0.35, y: 2.28, w: 8.5, h: 0.45,
+    fontSize: 20, bold: true, color: MINT, fontFace: MONO, isTextBox: true, margin: 0,
   });
-  s.addText("MIT licensed", {
-    x: M + 9.2, y: 2.78, w: 2.4, h: 0.35,
-    fontSize: 13, color: DIM, fontFace: B, align: "right", isTextBox: true, margin: 0,
-  });
-
-  // Verify in one command.
-  card(s, M, 3.65, 6.2, 1.55);
-  s.addText("Verify in one command", {
-    x: M + 0.3, y: 3.85, w: 5.5, h: 0.3,
-    fontSize: 14, bold: true, color: TEXT, fontFace: H, isTextBox: true, margin: 0,
-  });
-  s.addText("git clone --recurse-submodules <repo>\nforge test", {
-    x: M + 0.3, y: 4.2, w: 5.6, h: 0.6,
-    fontSize: 12, color: AMBER, fontFace: MONO, lineSpacing: 17, isTextBox: true, margin: 0,
-  });
-  s.addText("247 passing, no further setup", {
-    x: M + 0.3, y: 4.82, w: 5.5, h: 0.28,
-    fontSize: 12, color: MINT, fontFace: B, isTextBox: true, margin: 0,
+  s.addText("forge test  ·  247 passing", {
+    x: M + 8.3, y: 2.34, w: 3.3, h: 0.35,
+    fontSize: 12, color: DIM, fontFace: B, align: "right", isTextBox: true, margin: 0,
   });
 
-  // What is in the box.
-  card(s, M + 6.6, 3.65, 5.0, 1.55);
-  s.addText("What is in it", {
-    x: M + 6.9, y: 3.85, w: 4.4, h: 0.3,
+  // Judging criteria, answered.
+  card(s, M, 3.2, 6.2, 2.55);
+  s.addText("Judged on", {
+    x: M + 0.3, y: 3.4, w: 5.5, h: 0.3,
     fontSize: 14, bold: true, color: TEXT, fontFace: H, isTextBox: true, margin: 0,
   });
-  const inv = [
-    ["Uniswap v4 hook", "12.8 KB"],
-    ["BLS quorum AVS", "BN254"],
-    ["Live demo", "4 commands"],
+  const crit = [
+    ["Original idea", "First-trade protection, no history"],
+    ["Unique execution", "Trader identity + real BLS quorum"],
+    ["Impact", "Attacker pays 5.3x, victim untouched"],
+    ["Functionality", "247 tests, live loop on anvil"],
   ];
-  inv.forEach(([k, v], i) => {
-    const y = 4.22 + i * 0.31;
+  crit.forEach(([k, v], i) => {
+    const y = 3.78 + i * 0.47;
     s.addText(k, {
-      x: M + 6.9, y, w: 3.1, h: 0.28,
-      fontSize: 12, color: MUTED, fontFace: B, valign: "middle", isTextBox: true, margin: 0,
+      x: M + 0.3, y, w: 1.85, h: 0.4,
+      fontSize: 12, bold: true, color: MINT, fontFace: B, valign: "middle", isTextBox: true, margin: 0,
     });
     s.addText(v, {
-      x: M + 10.0, y, w: 1.3, h: 0.28,
-      fontSize: 12, bold: true, color: AMBER, fontFace: MONO, align: "right", valign: "middle",
-      isTextBox: true, margin: 0,
+      x: M + 2.25, y, w: 3.6, h: 0.4,
+      fontSize: 11, color: MUTED, fontFace: B, valign: "middle", isTextBox: true, margin: 0,
     });
   });
 
   // Theme fit — both halves.
-  card(s, M, 5.4, W - M * 2, 1.35, CARD2);
-  s.addText("MEV protection", {
-    x: M + 0.35, y: 5.6, w: 5.4, h: 0.3,
-    fontSize: 15, bold: true, color: MINT, fontFace: H, isTextBox: true, margin: 0,
+  card(s, M + 6.6, 3.2, 5.0, 2.55, CARD2);
+  s.addText("Theme", {
+    x: M + 6.9, y: 3.4, w: 4.4, h: 0.3,
+    fontSize: 14, bold: true, color: TEXT, fontFace: H, isTextBox: true, margin: 0,
   });
-  s.addText("Sandwich and JIT priced out on the first trade; the attacker pays 5.3x.", {
-    x: M + 0.35, y: 5.92, w: 5.4, h: 0.6,
-    fontSize: 12, color: MUTED, fontFace: B, lineSpacing: 16, isTextBox: true, margin: 0,
+  s.addText("MEV protection", {
+    x: M + 6.9, y: 3.8, w: 4.4, h: 0.28,
+    fontSize: 13, bold: true, color: MINT, fontFace: H, isTextBox: true, margin: 0,
+  });
+  s.addText("Sandwich and JIT priced out on the first trade.", {
+    x: M + 6.9, y: 4.08, w: 4.4, h: 0.5,
+    fontSize: 11, color: MUTED, fontFace: B, lineSpacing: 15, isTextBox: true, margin: 0,
   });
   s.addText("Sustainable liquidity", {
-    x: M + 6.2, y: 5.6, w: 5.4, h: 0.3,
-    fontSize: 15, bold: true, color: MINT, fontFace: H, isTextBox: true, margin: 0,
+    x: M + 6.9, y: 4.68, w: 4.4, h: 0.28,
+    fontSize: 13, bold: true, color: MINT, fontFace: H, isTextBox: true, margin: 0,
   });
-  s.addText("The penalty is an LP fee, so extraction is redirected into LP yield.", {
-    x: M + 6.2, y: 5.92, w: 5.4, h: 0.6,
-    fontSize: 12, color: MUTED, fontFace: B, lineSpacing: 16, isTextBox: true, margin: 0,
+  s.addText("The penalty is an LP fee — extraction becomes LP yield.", {
+    x: M + 6.9, y: 4.96, w: 4.4, h: 0.55,
+    fontSize: 11, color: MUTED, fontFace: B, lineSpacing: 15, isTextBox: true, margin: 0,
+  });
+
+  // Submission artifacts.
+  card(s, M, 5.95, W - M * 2, 0.85);
+  const arts = [
+    ["GitHub repo", "public, MIT"],
+    ["Demo video", "linked in form"],
+    ["Test cases", "247, in place of a frontend"],
+  ];
+  arts.forEach(([k, v], i) => {
+    const x = M + 0.35 + i * 3.95;
+    s.addText(k, {
+      x, y: 6.13, w: 3.7, h: 0.28,
+      fontSize: 12, bold: true, color: AMBER, fontFace: H, isTextBox: true, margin: 0,
+    });
+    s.addText(v, {
+      x, y: 6.4, w: 3.7, h: 0.28,
+      fontSize: 11, color: MUTED, fontFace: B, isTextBox: true, margin: 0,
+    });
   });
 
   s.addNotes(
-    "Closing slide. Everything a judge needs to act on: the repository, and the " +
-    "one command that proves it — clone and forge test, 247 passing with no setup. " +
-    "Both halves of the theme are covered: MEV protection is the obvious one, and " +
-    "sustainable liquidity because the escalated fee is an LP fee, so what the " +
-    "attacker does extract is redirected into yield for the liquidity providers " +
-    "they were preying on."
+    "Closing slide, laid out against the judging criteria so nothing has to be " +
+    "inferred. Original idea, unique execution, impact and functionality each get " +
+    "a line. Both halves of the theme are covered — MEV protection is the obvious " +
+    "one, sustainable liquidity because the escalated fee is an LP fee, so what the " +
+    "attacker extracts is redirected into yield for the liquidity providers it was " +
+    "preying on. Submission artifacts bottom row: repo, video, and test cases " +
+    "rather than a frontend."
   );
 }
 
