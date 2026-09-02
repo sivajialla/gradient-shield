@@ -723,4 +723,104 @@ function badge(slide, x, y, label, color) {
   );
 }
 
+
+// =====================================================================
+// 10. Submission
+// =====================================================================
+{
+  const s = pres.addSlide();
+  bg(s);
+
+  s.addText("GradientShield", {
+    x: M, y: 0.75, w: 9.5, h: 0.85,
+    fontSize: 42, bold: true, color: TEXT, fontFace: H, isTextBox: true, margin: 0,
+  });
+  s.addText("Project HK-UHI10-1050", {
+    x: M, y: 1.6, w: 6, h: 0.35,
+    fontSize: 14, color: MINT, fontFace: B, isTextBox: true, margin: 0,
+  });
+
+  // Repository — the thing a judge acts on.
+  card(s, M, 2.2, W - M * 2, 1.25, CARD2);
+  s.addText("Repository", {
+    x: M + 0.35, y: 2.4, w: 4, h: 0.3,
+    fontSize: 13, color: MUTED, fontFace: B, isTextBox: true, margin: 0,
+  });
+  s.addText("github.com/sivajialla/gradient-shield", {
+    x: M + 0.35, y: 2.7, w: 8.5, h: 0.45,
+    fontSize: 21, bold: true, color: MINT, fontFace: MONO, isTextBox: true, margin: 0,
+  });
+  s.addText("MIT licensed", {
+    x: M + 9.2, y: 2.78, w: 2.4, h: 0.35,
+    fontSize: 13, color: DIM, fontFace: B, align: "right", isTextBox: true, margin: 0,
+  });
+
+  // Verify in one command.
+  card(s, M, 3.65, 6.2, 1.55);
+  s.addText("Verify in one command", {
+    x: M + 0.3, y: 3.85, w: 5.5, h: 0.3,
+    fontSize: 14, bold: true, color: TEXT, fontFace: H, isTextBox: true, margin: 0,
+  });
+  s.addText("git clone --recurse-submodules <repo>\nforge test", {
+    x: M + 0.3, y: 4.2, w: 5.6, h: 0.6,
+    fontSize: 12, color: AMBER, fontFace: MONO, lineSpacing: 17, isTextBox: true, margin: 0,
+  });
+  s.addText("247 passing, no further setup", {
+    x: M + 0.3, y: 4.82, w: 5.5, h: 0.28,
+    fontSize: 12, color: MINT, fontFace: B, isTextBox: true, margin: 0,
+  });
+
+  // What is in the box.
+  card(s, M + 6.6, 3.65, 5.0, 1.55);
+  s.addText("What is in it", {
+    x: M + 6.9, y: 3.85, w: 4.4, h: 0.3,
+    fontSize: 14, bold: true, color: TEXT, fontFace: H, isTextBox: true, margin: 0,
+  });
+  const inv = [
+    ["Uniswap v4 hook", "12.8 KB"],
+    ["BLS quorum AVS", "BN254"],
+    ["Live demo", "4 commands"],
+  ];
+  inv.forEach(([k, v], i) => {
+    const y = 4.22 + i * 0.31;
+    s.addText(k, {
+      x: M + 6.9, y, w: 3.1, h: 0.28,
+      fontSize: 12, color: MUTED, fontFace: B, valign: "middle", isTextBox: true, margin: 0,
+    });
+    s.addText(v, {
+      x: M + 10.0, y, w: 1.3, h: 0.28,
+      fontSize: 12, bold: true, color: AMBER, fontFace: MONO, align: "right", valign: "middle",
+      isTextBox: true, margin: 0,
+    });
+  });
+
+  // Theme fit — both halves.
+  card(s, M, 5.4, W - M * 2, 1.35, CARD2);
+  s.addText("MEV protection", {
+    x: M + 0.35, y: 5.6, w: 5.4, h: 0.3,
+    fontSize: 15, bold: true, color: MINT, fontFace: H, isTextBox: true, margin: 0,
+  });
+  s.addText("Sandwich and JIT priced out on the first trade; the attacker pays 5.3x.", {
+    x: M + 0.35, y: 5.92, w: 5.4, h: 0.6,
+    fontSize: 12, color: MUTED, fontFace: B, lineSpacing: 16, isTextBox: true, margin: 0,
+  });
+  s.addText("Sustainable liquidity", {
+    x: M + 6.2, y: 5.6, w: 5.4, h: 0.3,
+    fontSize: 15, bold: true, color: MINT, fontFace: H, isTextBox: true, margin: 0,
+  });
+  s.addText("The penalty is an LP fee, so extraction is redirected into LP yield.", {
+    x: M + 6.2, y: 5.92, w: 5.4, h: 0.6,
+    fontSize: 12, color: MUTED, fontFace: B, lineSpacing: 16, isTextBox: true, margin: 0,
+  });
+
+  s.addNotes(
+    "Closing slide. Everything a judge needs to act on: the repository, and the " +
+    "one command that proves it — clone and forge test, 247 passing with no setup. " +
+    "Both halves of the theme are covered: MEV protection is the obvious one, and " +
+    "sustainable liquidity because the escalated fee is an LP fee, so what the " +
+    "attacker does extract is redirected into yield for the liquidity providers " +
+    "they were preying on."
+  );
+}
+
 pres.writeFile({ fileName: "GradientShield-Demo.pptx" }).then(() => console.log("written"));
