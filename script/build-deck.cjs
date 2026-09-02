@@ -93,8 +93,8 @@ function badge(slide, x, y, label, color) {
   );
 
   const stats = [
-    ["245", "tests, 20 suites"],
-    ["12.7 KB", "hook bytecode"],
+    ["247", "tests, 20 suites"],
+    ["12.8 KB", "hook bytecode"],
     ["5.3x", "attacker cost"],
   ];
   stats.forEach(([big, small], i) => {
@@ -119,7 +119,7 @@ function badge(slide, x, y, label, color) {
     "The headline framing matters: we do not block trades and we do not claim to " +
     "give the victim their price back. We make the attacker pay, measurably, while " +
     "leaving honest traders exactly where an ordinary pool would leave them. " +
-    "245 tests, and a live loop you can run on anvil."
+    "247 tests, and a live loop you can run on anvil."
   );
 }
 
@@ -208,7 +208,7 @@ function badge(slide, x, y, label, color) {
       fontSize: 11, color: col, fontFace: B, isTextBox: true, margin: 0,
     });
     s.addText(body, {
-      x: M + 4.0, y: y + 0.2, w: W - M * 2 - 4.35, h: 0.45,
+      x: M + 4.0, y: y + 0.2, w: W - M * 2 - 4.35, h: 0.55,
       fontSize: 13, color: MUTED, fontFace: B, isTextBox: true, margin: 0,
     });
   });
@@ -392,7 +392,7 @@ function badge(slide, x, y, label, color) {
   const s = pres.addSlide();
   bg(s);
   kicker(s, "MEASURED, NOT CLAIMED", 0.55);
-  title(s, "The attacker pays 5.3x. The victim pays nothing extra.", 0.95);
+  title(s, "Attacker pays 5.3x. Victim pays nothing extra.", 0.95);
 
   s.addText(
     "Identical sandwich, two identical pools — one plain, one guarded. " +
@@ -695,7 +695,7 @@ function badge(slide, x, y, label, color) {
   );
 
   const proof = [
-    ["245", "tests, 20 suites"],
+    ["247", "tests, 20 suites"],
     ["3 txs", "one block, real sandwich"],
     ["3/3", "operators signed"],
     ["10.5k", "gas, steady state"],
