@@ -110,8 +110,14 @@ function badge(slide, x, y, label, color) {
   });
 
   s.addText("Sivaji Alla", {
-    x: M, y: 6.45, w: 6, h: 0.32,
-    fontSize: 15, bold: true, color: TEXT, fontFace: H, isTextBox: true, margin: 0,
+    x: M, y: 6.45, w: 1.9, h: 0.32,
+    fontSize: 15, bold: true, color: TEXT, fontFace: H,
+    valign: "middle", isTextBox: true, margin: 0,
+  });
+  s.addText("sivajialla01@gmail.com", {
+    x: M + 2.0, y: 6.45, w: 4.5, h: 0.32,
+    fontSize: 12, color: MUTED, fontFace: B,
+    valign: "middle", isTextBox: true, margin: 0,
   });
   s.addText("Project HK-UHI10-1050", {
     x: M, y: 6.78, w: 6, h: 0.3,
