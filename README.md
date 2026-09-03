@@ -783,6 +783,7 @@ make install            # install Solidity + Node.js deps
 make test               # run all 247 tests
 make demo-bls           # BLS quorum integration suite (real signatures)
 make demo-fee           # trace showing PoolManager charging the escalated fee
+make demo-full          # the whole story in one terminal, for recording
 make demo-economics     # same sandwich, two pools: what the guard costs
 make demo               # 5-scenario reputation walkthrough
 make deploy-local       # deploy the full stack to anvil
@@ -905,6 +906,7 @@ forge script script/Deploy.s.sol --rpc-url $RPC_URL --broadcast
 │   ├── MultiHopSwap.t.sol               multi-hop settlement (3)
 │   └── SandwichAttackSim.t.sol          sandwich walkthrough (1)
 ├── script/
+│   ├── demo.sh                          one-command demo, for screen recording
 │   ├── build-deck.cjs                   regenerates the demo deck
 │   ├── DeployLocal.s.sol                one-shot anvil demo stack
 │   ├── Deploy.s.sol                     deploy with real EigenLayer infra
