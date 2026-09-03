@@ -1,0 +1,608 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GradientShield — Run of Show</title>
+<style>
+  /* Self-contained: system fonts only, no network requests. Works offline. */
+  :root {
+    --ground:      #F5F7F9;
+    --surface:     #FFFFFF;
+    --surface-alt: #EDF1F4;
+    --line:        #DDE4EA;
+    --ink:         #131A22;
+    --ink-soft:    #43505C;
+    --muted:       #6B7885;
+    --accent:      #0F766E;
+    --accent-soft: #D7EDEA;
+    --flag:        #A2560B;
+    --flag-soft:   #FBEEDC;
+
+    --f-ui:     ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --f-script: "Iowan Old Style", Georgia, "Times New Roman", Times, serif;
+    --f-mono:   ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:      #0E141B;
+      --surface:     #161F29;
+      --surface-alt: #1D2833;
+      --line:        #2A3742;
+      --ink:         #E9EFF4;
+      --ink-soft:    #B4C1CC;
+      --muted:       #7C8B99;
+      --accent:      #5EEAD4;
+      --accent-soft: #10312F;
+      --flag:        #F0B45E;
+      --flag-soft:   #33260F;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground:      #0E141B;
+    --surface:     #161F29;
+    --surface-alt: #1D2833;
+    --line:        #2A3742;
+    --ink:         #E9EFF4;
+    --ink-soft:    #B4C1CC;
+    --muted:       #7C8B99;
+    --accent:      #5EEAD4;
+    --accent-soft: #10312F;
+    --flag:        #F0B45E;
+    --flag-soft:   #33260F;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--f-script);
+    margin: 0;
+    padding: 0 20px 96px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap { max-width: 800px; margin: 0 auto; }
+
+  header.top {
+    padding: 52px 0 26px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  h1 {
+    font-family: var(--f-ui);
+    font-weight: 700;
+    font-size: clamp(28px, 5vw, 40px);
+    letter-spacing: -0.02em;
+    line-height: 1.1;
+    margin: 0 0 10px;
+  }
+
+  .standfirst {
+    font-size: 18px;
+    color: var(--ink-soft);
+    margin: 0 0 20px;
+    max-width: 62ch;
+  }
+
+  .facts { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 20px; }
+
+  .fact {
+    font-family: var(--f-mono);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    color: var(--ink-soft);
+    background: var(--surface-alt);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 5px 12px;
+  }
+
+  nav { display: flex; flex-wrap: wrap; gap: 18px; }
+
+  nav a {
+    font-family: var(--f-ui);
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--accent);
+    text-decoration: none;
+    border-bottom: 1px solid transparent;
+  }
+
+  nav a:hover, nav a:focus-visible { border-bottom-color: var(--accent); }
+
+  .pitch {
+    background: var(--accent-soft);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 22px 26px;
+    margin: 30px 0 12px;
+  }
+
+  .pitch .lbl {
+    font-family: var(--f-ui);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 9px;
+  }
+
+  .pitch p { margin: 0; font-size: 21px; line-height: 1.5; }
+
+  h2 {
+    font-family: var(--f-ui);
+    font-weight: 700;
+    font-size: 27px;
+    letter-spacing: -0.015em;
+    margin: 56px 0 4px;
+    scroll-margin-top: 20px;
+  }
+
+  .sub { color: var(--muted); font-size: 15px; margin: 0 0 22px; }
+
+  /* ---- blocks: slides and demo cues share the same shell ---- */
+
+  section.block {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 20px 26px 24px;
+    margin-bottom: 16px;
+  }
+
+  section.block.key { border-color: var(--accent); }
+
+  .head {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 3px;
+  }
+
+  .num {
+    font-family: var(--f-mono);
+    font-weight: 600;
+    font-size: 13px;
+    color: var(--accent);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .name {
+    font-family: var(--f-ui);
+    font-weight: 600;
+    font-size: 20px;
+    letter-spacing: -0.01em;
+    margin: 0;
+    flex: 1 1 auto;
+  }
+
+  .clock {
+    font-family: var(--f-mono);
+    font-size: 12px;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  .onscreen {
+    font-family: var(--f-ui);
+    font-size: 12px;
+    color: var(--muted);
+    margin: 0 0 14px;
+  }
+
+  .onscreen b { color: var(--ink-soft); font-weight: 600; }
+
+  .say p {
+    font-size: 20px;
+    line-height: 1.55;
+    margin: 0 0 13px;
+    color: var(--ink);
+  }
+
+  .say p:last-child { margin-bottom: 0; }
+  .say strong { font-weight: 600; color: var(--accent); }
+
+  code {
+    font-family: var(--f-mono);
+    font-size: 0.88em;
+    background: var(--surface-alt);
+    border-radius: 4px;
+    padding: 1px 5px;
+  }
+
+  .cue {
+    font-family: var(--f-ui);
+    font-size: 13px;
+    color: var(--flag);
+    background: var(--flag-soft);
+    border-radius: 6px;
+    padding: 9px 13px;
+    margin-top: 15px;
+  }
+
+  pre {
+    font-family: var(--f-mono);
+    font-size: 13px;
+    background: var(--surface-alt);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    margin: 0 0 16px;
+    color: var(--ink);
+    line-height: 1.5;
+  }
+
+  details.qa {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    margin-bottom: 10px;
+  }
+
+  details.qa summary {
+    font-family: var(--f-ui);
+    font-weight: 600;
+    font-size: 16px;
+    padding: 15px 20px;
+    cursor: pointer;
+    list-style: none;
+  }
+
+  details.qa summary::-webkit-details-marker { display: none; }
+
+  details.qa summary::before {
+    content: "+";
+    font-family: var(--f-mono);
+    color: var(--accent);
+    margin-right: 10px;
+  }
+
+  details.qa[open] summary::before { content: "\2212"; }
+
+  details.qa .ans {
+    padding: 0 20px 18px;
+    font-size: 17px;
+    color: var(--ink-soft);
+    line-height: 1.55;
+  }
+
+  details.qa summary:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+    border-radius: 10px;
+  }
+
+  ul.check { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 10px; }
+
+  ul.check li {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+    font-size: 16px;
+    color: var(--ink-soft);
+  }
+
+  ul.check li::before {
+    content: "";
+    flex: 0 0 auto;
+    width: 15px;
+    height: 15px;
+    margin-top: 5px;
+    border: 1.5px solid var(--muted);
+    border-radius: 4px;
+  }
+
+  footer {
+    margin-top: 54px;
+    padding-top: 22px;
+    border-top: 1px solid var(--line);
+    font-size: 14px;
+    color: var(--muted);
+  }
+
+  @media (max-width: 560px) {
+    section.block { padding: 17px 17px 19px; }
+    .say p { font-size: 18px; }
+    .pitch p { font-size: 19px; }
+  }
+
+  @media print {
+    body { background: #fff; color: #000; padding: 0; }
+    section.block, details.qa { break-inside: avoid; border-color: #ccc; }
+    nav, footer { display: none; }
+    details.qa { open: true; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="top">
+    <h1>GradientShield — Run of Show</h1>
+    <p class="standfirst">
+      Everything you say, in order. The demo narration is keyed to what appears
+      on screen as the script runs; the slide script has the clock running.
+    </p>
+    <div class="facts">
+      <span class="fact">11 slides &middot; 7:10</span>
+      <span class="fact">demo &middot; ~1:10</span>
+      <span class="fact">HK-UHI10-1050</span>
+      <span class="fact">Sivaji Alla</span>
+    </div>
+    <nav>
+      <a href="#demo">Demo video</a>
+      <a href="#slides">Slide script</a>
+      <a href="#qa">Questions</a>
+      <a href="#checklist">Before you record</a>
+    </nav>
+  </header>
+
+  <div class="pitch">
+    <div class="lbl">If you only get one sentence</div>
+    <p>
+      A Uniswap v4 hook that makes sandwich attacks unprofitable on the very
+      first trade &mdash; no reputation history needed &mdash; without ever
+      blocking a trade. The attacker pays 5.3&times; more. The honest trader
+      pays exactly what they'd pay on any other pool.
+    </p>
+  </div>
+
+  <!-- ================= DEMO ================= -->
+
+  <h2 id="demo">Demo video</h2>
+  <p class="sub">
+    One command, one terminal, no cuts. Record with <code>BEAT=6</code> so there
+    is room to talk between sections.
+  </p>
+
+  <pre>BEAT=6 make demo-full</pre>
+
+  <section class="block">
+    <div class="head"><span class="num">CUE</span><h3 class="name">Title line appears</h3></div>
+    <div class="say">
+      <p>This is GradientShield. Everything you're about to see is one command, in one terminal, no cuts.</p>
+    </div>
+  </section>
+
+  <section class="block">
+    <div class="head"><span class="num">CUE</span><h3 class="name">PART 1 header</h3></div>
+    <div class="say"><p>First &mdash; does the code hold up.</p></div>
+  </section>
+
+  <section class="block">
+    <div class="head"><span class="num">CUE</span><h3 class="name">“247 tests passed” prints</h3></div>
+    <div class="say"><p>247 tests, twenty suites, under a second. No setup.</p></div>
+  </section>
+
+  <section class="block key">
+    <div class="head"><span class="num">CUE</span><h3 class="name">PART 2 header</h3></div>
+    <div class="say">
+      <p>Now the important part. The same sandwich attack, against two identical pools. Same liquidity, same trade sizes. The only difference is the guard.</p>
+    </div>
+  </section>
+
+  <section class="block key">
+    <div class="head"><span class="num">CUE</span><h3 class="name">The table prints</h3></div>
+    <div class="say">
+      <p>Pool A is a plain hook. Everyone pays 0.30%. The attacker nets minus 0.011 ETH.</p>
+      <p>Pool B is GradientShield. Look at the victim's line first &mdash; 2.990344. <strong>Identical to the digit.</strong> They paid base fee. The guard cost them nothing.</p>
+      <p>Now the attacker. Minus 0.059. That's <strong>5.3 times worse</strong>.</p>
+      <p>And the bottom line: change for the victim, exactly zero.</p>
+    </div>
+    <div class="cue">This is the heart of the whole submission. Slow down and let the numbers sit.</div>
+  </section>
+
+  <section class="block">
+    <div class="head"><span class="num">CUE</span><h3 class="name">PART 3 header</h3></div>
+    <div class="say"><p>That's a test harness. Now a real chain.</p></div>
+  </section>
+
+  <section class="block">
+    <div class="head"><span class="num">CUE</span><h3 class="name">Deploy addresses print</h3></div>
+    <div class="say"><p>Local chain, a pool with the hook, and a three-operator BLS quorum.</p></div>
+  </section>
+
+  <section class="block key">
+    <div class="head"><span class="num">CUE</span><h3 class="name">Attack output</h3></div>
+    <div class="say">
+      <p>The bot and the victim are separate wallets using the <strong>same router</strong> &mdash; the case that defeats most hooks. Bot front-runs, victim swaps, bot back-runs. All three mined into one block.</p>
+      <p>Bot's back-run pays 1.50%. Victim pays 0.30%. And the router's own score stays zero &mdash; we score the trader, not the router.</p>
+    </div>
+  </section>
+
+  <section class="block">
+    <div class="head"><span class="num">CUE</span><h3 class="name">Quorum verdict</h3></div>
+    <div class="say">
+      <p>The operators pick up those events, independently agree on 65, sign with real BLS keys, and the pairing precompile verifies the aggregate on-chain.</p>
+    </div>
+  </section>
+
+  <section class="block key">
+    <div class="head"><span class="num">CUE</span><h3 class="name">Second attack</h3></div>
+    <div class="say">
+      <p>Same attack again. Now the bot carries that score &mdash; repriced to 1.05% before it even starts. The victim still pays 0.30%.</p>
+    </div>
+  </section>
+
+  <section class="block">
+    <div class="head"><span class="num">CUE</span><h3 class="name">Closing rule</h3></div>
+    <div class="say"><p>Every number on the deck came from that.</p></div>
+    <div class="cue">Best closing line you have. It turns the deck from claims into evidence.</div>
+  </section>
+
+  <!-- ================= SLIDES ================= -->
+
+  <h2 id="slides">Slide script</h2>
+  <p class="sub">11 slides, 7:10 total. Bordered blocks are the four that carry the argument.</p>
+
+  <section class="block">
+    <div class="head"><span class="num">01</span><h3 class="name">Title</h3><span class="clock">0:20 &middot; ends 0:20</span></div>
+    <p class="onscreen"><b>On screen</b> — GradientShield · 247 tests · 12.8 KB · 5.3× · your name</p>
+    <div class="say">
+      <p>I'm Sivaji Alla. GradientShield is a Uniswap v4 hook that makes MEV extraction unprofitable.</p>
+      <p>Two things it deliberately does <strong>not</strong> do. It doesn't block trades. And it doesn't claim to give a sandwich victim their price back. What it does is make the attacker pay — measurably — while leaving honest traders exactly where an ordinary pool would.</p>
+    </div>
+  </section>
+
+  <section class="block">
+    <div class="head"><span class="num">02</span><h3 class="name">The problem</h3><span class="clock">0:35 &middot; ends 0:55</span></div>
+    <p class="onscreen"><b>On screen</b> — three numbered cards, then “why existing defences miss it”</p>
+    <div class="say">
+      <p>A sandwich is three transactions in one block. Bot buys ahead. Victim executes at the worse price. Bot sells into it.</p>
+      <p>Three reasons existing defences miss it. Reputation is reactive, so a fresh address's first attack always lands. Hard caps that revert oversized trades break permissionlessness for everyone. And v4 hands a hook the <strong>router</strong> address, not the person — so everyone behind the Universal Router looks like one trader.</p>
+    </div>
+    <div class="cue">Add: “Those three problems are the next three slides.” It buys you the whole middle section.</div>
+  </section>
+
+  <section class="block key">
+    <div class="head"><span class="num">03</span><h3 class="name">Original idea</h3><span class="clock">0:40 &middot; ends 1:35</span></div>
+    <p class="onscreen"><b>On screen</b> — three claims, typical hook vs GradientShield</p>
+    <div class="say">
+      <p>Three things that are each unusual, and together are the idea.</p>
+      <p><strong>One</strong> — protection that works before any reputation exists. That closes the cold-start hole every reputation system has.</p>
+      <p><strong>Two</strong> — we penalise without ever excluding. No trade is refused for its size. The fee just climbs.</p>
+      <p><strong>Three</strong> — identity resolved at the trader, not the router. That's the part most v4 hooks get wrong without noticing.</p>
+    </div>
+  </section>
+
+  <section class="block">
+    <div class="head"><span class="num">04</span><h3 class="name">Five layers</h3><span class="clock">0:35 &middot; ends 2:10</span></div>
+    <p class="onscreen"><b>On screen</b> — the five defence layers, and when each acts</p>
+    <div class="say">
+      <p>Five layers. The split that matters is one-to-three versus four-and-five.</p>
+      <p>One to three act on the first ever trade. No reputation lookup, nothing to wait for. Four and five build the long memory, so repeat offenders escalate.</p>
+    </div>
+    <div class="cue">Point at layer 1 and say “no reverts.” It sets up the next slide.</div>
+  </section>
+
+  <section class="block key">
+    <div class="head"><span class="num">05</span><h3 class="name">Permissionless</h3><span class="clock">0:45 &middot; ends 2:55</span></div>
+    <p class="onscreen"><b>On screen</b> — rejected hard cap vs shipped fee tiers (0.30 / 1.50 / 3.00 / 5.00%)</p>
+    <div class="say">
+      <p>The first version reverted trades over 5 ETH. That kills the sandwich. It also refuses every honest large trade. A pool you can be refused from isn't permissionless.</p>
+      <p>So instead the fee escalates with the trader's own volume in that block. Anyone can trade any size at any time. It just gets progressively more expensive to do the thing only an attacker needs to do.</p>
+    </div>
+  </section>
+
+  <section class="block key">
+    <div class="head"><span class="num">06</span><h3 class="name">Trader identity</h3><span class="clock">0:50 &middot; ends 3:45</span></div>
+    <p class="onscreen"><b>On screen</b> — how scoring the router breaks, and the three-step resolution</p>
+    <div class="say">
+      <p>This is the question anyone who knows v4 will ask. The sender the hook receives is whoever called <code>poolManager.swap</code>. That's a router.</p>
+      <p>Score the router and two things break. An honest user inherits a bot's volume and pays its penalty. And the router itself accumulates score until it crosses the reject threshold — bricking the pool for everyone behind it.</p>
+      <p>So we resolve the real trader. The allow-list is the security-critical part. You never ask an unvetted contract who it represents, because it'll name whatever address is convenient.</p>
+    </div>
+  </section>
+
+  <section class="block key">
+    <div class="head"><span class="num">07</span><h3 class="name">Measured</h3><span class="clock">1:00 &middot; ends 4:45</span></div>
+    <p class="onscreen"><b>On screen</b> — attacker's-loss chart and the A/B table. <b>Your most important slide.</b></p>
+    <div class="say">
+      <p>Same sandwich. Two identical pools. Same liquidity, same sizes. The only difference is the guard.</p>
+      <p>The attacker's loss goes from 0.011 to 0.059 ETH. That's <strong>5.3&times;</strong>. The extra 0.048 is exactly the fee delta on its back-run.</p>
+      <p>Now the right-hand column — this is the part people miss. The victim's execution is <strong>identical to the digit</strong>. They still pay base fee. The guard costs innocent flow nothing.</p>
+    </div>
+    <div class="cue">Slow down. Let the table sit for a beat before moving on.</div>
+  </section>
+
+  <section class="block">
+    <div class="head"><span class="num">08</span><h3 class="name">Limits</h3><span class="clock">0:40 &middot; ends 5:25</span></div>
+    <p class="onscreen"><b>On screen</b> — “a deterrent, not a shield”, plus four test-backed limitations</p>
+    <div class="say">
+      <p>I'd rather say this than be caught on it. The victim is still sandwiched. The front-run lands before they execute, so the price has already moved. A fee charged afterwards can't give that back.</p>
+      <p>This is a <strong>deterrent, not a shield</strong>. It protects the next victim by destroying the strategy's economics. And it routes what does get extracted to LPs, because the escalated fee is an LP fee.</p>
+      <p>Every limitation on this slide has a test asserting it.</p>
+    </div>
+  </section>
+
+  <section class="block">
+    <div class="head"><span class="num">09</span><h3 class="name">The AVS</h3><span class="clock">0:40 &middot; ends 6:05</span></div>
+    <p class="onscreen"><b>On screen</b> — Hook → Operators → Aggregator → Chain, the pairing equation, scoring weights</p>
+    <div class="say">
+      <p>The AVS isn't mocked. Operators sign real BN254 BLS signatures. The aggregator sums them. The EVM pairing precompile verifies the aggregate against the signer set the contract derives from its own registry.</p>
+      <p>Forged signatures, wrong aggregate keys, duplicate signers — all rejected, all tested.</p>
+    </div>
+  </section>
+
+  <section class="block">
+    <div class="head"><span class="num">10</span><h3 class="name">Functionality</h3><span class="clock">0:40 &middot; ends 6:45</span></div>
+    <p class="onscreen"><b>On screen</b> — what the suite proves, and the real end-to-end run output</p>
+    <div class="say">
+      <p>I'm submitting test cases rather than a frontend, so this is the evidence.</p>
+      <p>Left is what the suite proves — by claim, not by count. Identity resolution. Real BLS signatures. The volume tiers. A regression guard for detection state surviving across transactions.</p>
+      <p>Right is an actual run. Three separate transactions mined into one block. Bot penalised, victim untouched, router score zero, quorum signed.</p>
+      <p>Every number on this deck is reproducible from a clean clone.</p>
+    </div>
+  </section>
+
+  <section class="block">
+    <div class="head"><span class="num">11</span><h3 class="name">Submission</h3><span class="clock">0:25 &middot; ends 7:10</span></div>
+    <p class="onscreen"><b>On screen</b> — repo URL, criteria answered, both theme halves, three artifacts</p>
+    <div class="say">
+      <p>Clone it and run <code>forge test</code>. 247 passing, no setup, about a second.</p>
+      <p>Both halves of the theme. MEV protection is the obvious one. Sustainable liquidity because the penalty is an LP fee — what the attacker extracts gets redirected into yield for the LPs they were preying on.</p>
+    </div>
+  </section>
+
+  <!-- ================= Q&A ================= -->
+
+  <h2 id="qa">Questions you'll get</h2>
+  <p class="sub">Rehearse the first three. They're the ones that decide whether the room believes you.</p>
+
+  <details class="qa">
+    <summary>Why is tx.origin safe here?</summary>
+    <div class="ans">It's used for pricing, never authorization. So the usual phishing objection doesn't apply — worst case, an address is charged for a swap its own signature authorized. And it can't be forged without their private key.</div>
+  </details>
+
+  <details class="qa">
+    <summary>How does a later fee help the victim who already got sandwiched?</summary>
+    <div class="ans">It doesn't. That's why I called it a deterrent, not a shield. The victim loses the same amount in both pools. What changes is the attacker's economics — 0.011 to 0.059 ETH — so the strategy stops being worth running.</div>
+  </details>
+
+  <details class="qa">
+    <summary>Why does the hook have an owner?</summary>
+    <div class="ans">It can only mark routers as originator-forwarding. It can't set scores, change fees, reject anyone, or move funds. And it's renounceable.</div>
+  </details>
+
+  <details class="qa">
+    <summary>Is the BLS real, or a stub?</summary>
+    <div class="ans">Real. BN254, verified through the EVM pairing precompile. Forged signatures and duplicate signers are rejected by tests.</div>
+  </details>
+
+  <details class="qa">
+    <summary>What happens with account abstraction?</summary>
+    <div class="ans">Behind an unvetted router, tx.origin is the bundler, so 4337 users share an identity. Register the router as trusted and it declares the real account. The interface and allow-list are in place; registering a router is a deployment step.</div>
+  </details>
+
+  <!-- ================= CHECKLIST ================= -->
+
+  <h2 id="checklist">Before you record</h2>
+  <p class="sub">Five minutes of setup that prevents the two things that ruin a take.</p>
+
+  <ul class="check">
+    <li>Run <code>make demo-full</code> once first, so Foundry's cache is warm — otherwise Part 1 compiles on camera.</li>
+    <li>Terminal font up to 18–20pt, window about 100 columns wide so nothing wraps.</li>
+    <li>Open the deck and look at all 11 slides — 1 and 5 have the tightest text margins.</li>
+    <li>Presenter view on; the speaker notes are already in the file.</li>
+    <li>Upload the video and have the link ready for the Tally form.</li>
+    <li>Form fields: repo link, video link, and note that test cases stand in for a frontend.</li>
+  </ul>
+
+  <footer>
+    Timings are speaking pace, not reading pace — expect to land within about
+    twenty seconds of 7:10. If you need to cut, take depth out of slides 4 and
+    9. Never cut 3, 6 or 7.
+  </footer>
+
+</div>
+</body>
+</html>

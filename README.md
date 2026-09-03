@@ -921,6 +921,7 @@ forge script script/Deploy.s.sol --rpc-url $RPC_URL --broadcast
 │   ├── checkScore.js                    look up a live score
 │   ├── keys.json                        demo BLS keys (public, regenerable)
 │   └── abi/                             contract ABIs for the operator
+├── presentation.html                    run of show: slide + demo narration
 ├── GradientShield-Demo.pptx             11-slide pitch deck (regenerate:
 │                                         node script/build-deck.cjs)
 ├── lib/                                 git-submodule dependencies
