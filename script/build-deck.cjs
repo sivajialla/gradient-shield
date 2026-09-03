@@ -501,9 +501,12 @@ function badge(slide, x, y, label, color) {
       showLegend: false,
       catAxisLabelColor: MUTED,
       catAxisLabelFontSize: 12,
-      valAxisLabelColor: MUTED,
-      valAxisLabelFontSize: 10,
-      valGridLine: { color: CARD2, size: 1 },
+      // The value axis is hidden: every bar already carries its exact value as
+      // a data label, so the axis only duplicated it — and its labels were
+      // indenting the plot area, leaving the bars visibly inset from the
+      // slide title above them.
+      valAxisHidden: true,
+      valGridLine: { style: "none" },
       catGridLine: { style: "none" },
       plotArea: { fill: { color: BG } },
       chartArea: { fill: { color: BG } },
