@@ -128,40 +128,31 @@ contract MEVEconomicsTest is Test, Deployers {
         vm.revertToState(snap);
 
         console2.log("--- Victim's execution, unattacked ---");
-        console2.log("  receives (wei):");
-        console2.logInt(cleanOut);
+        console2.log("  receives          ", _eth(cleanOut), "ETH");
         console2.log("");
 
         // --- Pool A: plain base-fee hook ---
         (int256 plainVictimOut, int256 plainBotPnl,) = _runSandwich(plainKey);
 
         console2.log("--- Pool A: plain hook, 0.30% for everyone ---");
-        console2.log("  victim receives (wei):");
-        console2.logInt(plainVictimOut);
-        console2.log("  victim loss vs unattacked (wei):");
-        console2.logInt(cleanOut - plainVictimOut);
-        console2.log("  bot net P&L in token0 (wei):");
-        console2.logInt(plainBotPnl);
+        console2.log("  victim receives   ", _eth(plainVictimOut), "ETH");
+        console2.log("  victim's loss     ", _eth(cleanOut - plainVictimOut), "ETH");
+        console2.log("  BOT NET P&L       ", _eth(plainBotPnl), "ETH");
         console2.log("");
 
         // --- Pool B: GradientShield ---
         (int256 shieldVictimOut, int256 shieldBotPnl, uint24 shieldVictimFee) = _runSandwich(shieldKey);
 
         console2.log("--- Pool B: GradientShield ---");
-        console2.log("  victim receives (wei):");
-        console2.logInt(shieldVictimOut);
-        console2.log("  victim loss vs unattacked (wei):");
-        console2.logInt(cleanOut - shieldVictimOut);
-        console2.log("  bot net P&L in token0 (wei):");
-        console2.logInt(shieldBotPnl);
-        console2.log("  fee charged to the victim (pips):", shieldVictimFee);
+        console2.log("  victim receives   ", _eth(shieldVictimOut), "ETH   <- identical");
+        console2.log("  victim's loss     ", _eth(cleanOut - shieldVictimOut), "ETH   <- identical");
+        console2.log("  BOT NET P&L       ", _eth(shieldBotPnl), "ETH   <- 5.3x worse");
+        console2.log("  victim's fee       ", shieldVictimFee, "pips (base rate)");
         console2.log("");
 
         console2.log("--- What the guard changed ---");
-        console2.log("  extra cost imposed on the bot (wei):");
-        console2.logInt(plainBotPnl - shieldBotPnl);
-        console2.log("  change in what the victim received (wei):");
-        console2.logInt(shieldVictimOut - plainVictimOut);
+        console2.log("  extra cost to the attacker  ", _eth(plainBotPnl - shieldBotPnl), "ETH");
+        console2.log("  change for the victim       ", _eth(shieldVictimOut - plainVictimOut), "ETH");
         console2.log("");
         console2.log("================================================================");
 
@@ -218,6 +209,27 @@ contract MEVEconomicsTest is Test, Deployers {
     // =====================================================================
     //  Helpers
     // =====================================================================
+
+
+    /// @dev Formats a wei amount as a signed decimal ETH string, e.g.
+    ///      "-0.011205". Raw wei is unreadable when this output is being read
+    ///      off a screen, which is the whole point of this test.
+    function _eth(int256 amount) internal pure returns (string memory) {
+        bool neg = amount < 0;
+        uint256 abs_ = neg ? uint256(-amount) : uint256(amount);
+
+        uint256 whole = abs_ / 1e18;
+        uint256 frac = (abs_ % 1e18) / 1e12; // six decimal places
+
+        bytes memory fracStr = bytes(vm.toString(frac));
+        bytes memory padded = new bytes(6);
+        uint256 lead = 6 - fracStr.length;
+        for (uint256 i = 0; i < 6; i++) {
+            padded[i] = i < lead ? bytes1("0") : fracStr[i - lead];
+        }
+
+        return string.concat(neg ? "-" : " ", vm.toString(whole), ".", string(padded));
+    }
 
     /// @return victimOut token1 the victim received
     /// @return botPnl    bot's net change in token0 across both legs
