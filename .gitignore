@@ -21,3 +21,8 @@ dist/
 .vscode/
 .idea/
 lcov.info
+
+# Screen recordings — keep the repo cloneable
+*.mov
+*.mp4
+*.mkv
